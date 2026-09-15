@@ -1,3 +1,4 @@
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -128,7 +129,6 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
       
       List<Map<String, dynamic>> lista = List<Map<String, dynamic>>.from(response);
 
-      // Ordenar cronologicamente por Data e Horário
       lista.sort((a, b) {
         try {
           DateTime dtA = DateTime.parse(a['data_aula'].split('/').reversed.join('-'));
@@ -1027,6 +1027,7 @@ class _AbaControleAulasMobileState extends State<AbaControleAulasMobile> {
   final supabase = Supabase.instance.client;
   List<Map<String, dynamic>> aulas = [];
   bool carregando = true;
+  String filtroStatus = 'Agendada'; // 'Agendada' ou 'Realizada'
 
   @override
   void initState() {
@@ -1036,7 +1037,7 @@ class _AbaControleAulasMobileState extends State<AbaControleAulasMobile> {
 
   Future<void> carregarAulas() async {
     try {
-      final res = await supabase.from('aulas').select();
+      final res = await supabase.from('aulas').select().eq('status_aula', filtroStatus);
       List<Map<String, dynamic>> lista = List<Map<String, dynamic>>.from(res);
 
       lista.sort((a, b) {
@@ -1061,13 +1062,123 @@ class _AbaControleAulasMobileState extends State<AbaControleAulasMobile> {
     }
   }
 
+  Future<void> editarAula(Map<String, dynamic> aula) async {
+    final assuntoCtrl = TextEditingController(text: aula['assunto'] ?? '');
+    DateTime dataSel = DateTime.now();
+    try {
+      dataSel = DateTime.parse(aula['data_aula'].split('/').reversed.join('-'));
+    } catch (_) {}
+
+    TimeOfDay horaSel = const TimeOfDay(hour: 14, minute: 0);
+    try {
+      final partes = (aula['horario'] ?? '14:00').split(':');
+      horaSel = TimeOfDay(hour: int.parse(partes[0]), minute: int.parse(partes[1]));
+    } catch (_) {}
+
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setStateModal) => AlertDialog(
+          title: Text('Editar Aula: ${aula['aluno']}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              OutlinedButton.icon(
+                onPressed: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    initialDate: dataSel,
+                    firstDate: DateTime(2025),
+                    lastDate: DateTime(2030),
+                  );
+                  if (picked != null) setStateModal(() => dataSel = picked);
+                },
+                icon: const Icon(Icons.calendar_month),
+                label: Text('Data: ${dataSel.toString().substring(0, 10)}'),
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: () async {
+                  final picked = await showTimePicker(
+                    context: context,
+                    initialTime: horaSel,
+                  );
+                  if (picked != null) setStateModal(() => horaSel = picked);
+                },
+                icon: const Icon(Icons.access_time),
+                label: Text('Horário: ${horaSel.format(context)}'),
+              ),
+              const SizedBox(height: 10),
+              TextField(controller: assuntoCtrl, decoration: const InputDecoration(labelText: 'Assunto')),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
+            ElevatedButton(
+              onPressed: () async {
+                String dataStr = "${dataSel.day.toString().padLeft(2, '0')}/${dataSel.month.toString().padLeft(2, '0')}/${dataSel.year}";
+                String horaStr = "${horaSel.hour.toString().padLeft(2, '0')}:${horaSel.minute.toString().padLeft(2, '0')}";
+
+                await supabase.from('aulas').update({
+                  'data_aula': dataStr,
+                  'horario': horaStr,
+                  'assunto': assuntoCtrl.text.trim(),
+                }).eq('id', aula['id']);
+
+                if (context.mounted) Navigator.pop(context);
+                carregarAulas();
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aula atualizada com sucesso!')));
+                }
+              },
+              child: const Text('Salvar'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(50),
+        child: Container(
+          color: Colors.white,
+          alignment: Alignment.center,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ChoiceChip(
+                label: const Text('Agendadas'),
+                selected: filtroStatus == 'Agendada',
+                onSelected: (sel) {
+                  if (sel) {
+                    setState(() => filtroStatus = 'Agendada');
+                    carregarAulas();
+                  }
+                },
+              ),
+              const SizedBox(width: 10),
+              ChoiceChip(
+                label: const Text('Realizadas'),
+                selected: filtroStatus == 'Realizada',
+                onSelected: (sel) {
+                  if (sel) {
+                    setState(() => filtroStatus = 'Realizada');
+                    carregarAulas();
+                  }
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
       body: carregando
           ? const Center(child: CircularProgressIndicator())
           : aulas.isEmpty
-              ? const Center(child: Text('Nenhuma aula registrada.'))
+              ? Center(child: Text('Nenhuma aula $filtroStatus.'))
               : ListView.builder(
                   itemCount: aulas.length,
                   itemBuilder: (context, index) {
@@ -1077,6 +1188,10 @@ class _AbaControleAulasMobileState extends State<AbaControleAulasMobile> {
                       child: ListTile(
                         title: Text('${a['aluno']} - ${a['disciplina']}', style: const TextStyle(fontWeight: FontWeight.bold)),
                         subtitle: Text('Data: ${a['data_aula']} às ${a['horario']}\nAssunto: ${a['assunto'] ?? ''}\nStatus: ${a['status_aula']}'),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.edit, color: Colors.indigo),
+                          onPressed: () => editarAula(a),
+                        ),
                         isThreeLine: true,
                       ),
                     );
@@ -1098,6 +1213,7 @@ class _AbaCobrancasMobileState extends State<AbaCobrancasMobile> {
   final supabase = Supabase.instance.client;
   List<Map<String, dynamic>> cobrancas = [];
   bool carregando = true;
+  String filtroStatusCob = 'Todas'; // 'Todas', 'Pendente', 'Pago'
 
   @override
   void initState() {
@@ -1107,10 +1223,27 @@ class _AbaCobrancasMobileState extends State<AbaCobrancasMobile> {
 
   Future<void> carregarCobrancas() async {
     try {
-      final res = await supabase.from('cobrancas').select().order('id', ascending: false);
+      var query = supabase.from('cobrancas').select();
+      if (filtroStatusCob != 'Todas') {
+        query = query.eq('status', filtroStatusCob);
+      }
+      final res = await query;
+      List<Map<String, dynamic>> lista = List<Map<String, dynamic>>.from(res);
+
+      // Ordem cronológica por data de vencimento
+      lista.sort((a, b) {
+        try {
+          DateTime dtA = DateTime.parse(a['vencimento'].split('/').reversed.join('-'));
+          DateTime dtB = DateTime.parse(b['vencimento'].split('/').reversed.join('-'));
+          return dtA.compareTo(dtB);
+        } catch (_) {
+          return 0;
+        }
+      });
+
       if (!mounted) return;
       setState(() {
-        cobrancas = List<Map<String, dynamic>>.from(res);
+        cobrancas = lista;
         carregando = false;
       });
     } catch (_) {
@@ -1223,6 +1356,31 @@ class _AbaCobrancasMobileState extends State<AbaCobrancasMobile> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(50),
+        child: Container(
+          color: Colors.white,
+          alignment: Alignment.center,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: ['Todas', 'Pendente', 'Pago'].map((st) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: ChoiceChip(
+                  label: Text(st),
+                  selected: filtroStatusCob == st,
+                  onSelected: (sel) {
+                    if (sel) {
+                      setState(() => filtroStatusCob = st);
+                      carregarCobrancas();
+                    }
+                  },
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      ),
       body: carregando
           ? const Center(child: CircularProgressIndicator())
           : cobrancas.isEmpty
@@ -1385,6 +1543,8 @@ class _AbaEvolucaoGanhosMobileState extends State<AbaEvolucaoGanhosMobile> {
   bool carregando = true;
   String escalaSel = "Mensal";
 
+  final List<String> mesesNomes = ['', 'Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+
   @override
   void initState() {
     super.initState();
@@ -1394,7 +1554,7 @@ class _AbaEvolucaoGanhosMobileState extends State<AbaEvolucaoGanhosMobile> {
   Future<void> calcularEvolucao() async {
     try {
       final res = await supabase.from('cobrancas').select().eq('status', 'Pago');
-      Map<String, double> agrupado = {};
+      Map<String, Map<String, dynamic>> agrupado = {};
 
       for (var r in res) {
         String? venc = r['vencimento'];
@@ -1403,21 +1563,51 @@ class _AbaEvolucaoGanhosMobileState extends State<AbaEvolucaoGanhosMobile> {
 
         try {
           DateTime dtObj = DateTime.parse(venc.split('/').reversed.join('-'));
-          String chave = "${dtObj.year}-${dtObj.month.toString().padLeft(2, '0')}";
-          if (escalaSel == "Anual") {
-            chave = "${dtObj.year}";
-          } else if (escalaSel == "Diária") {
-            chave = venc;
+          String chaveSort = "";
+          String label = "";
+
+          if (escalaSel == "Diária") {
+            chaveSort = "${dtObj.year}${dtObj.month.toString().padLeft(2, '0')}${dtObj.day.toString().padLeft(2, '0')}";
+            label = "${dtObj.day.toString().padLeft(2, '0')}/${dtObj.month.toString().padLeft(2, '0')}/${dtObj.year}";
           } else if (escalaSel == "Semanal") {
-            int semanaAno = (dtObj.day - 1) ~/ 7 + 1;
-            chave = "${dtObj.year}-S$semanaAno (${dtObj.month.toString().padLeft(2, '0')})";
+            int semanaNum = ((dtObj.day - 1) ~/ 7) + 1;
+            chaveSort = "${dtObj.year}${dtObj.month.toString().padLeft(2, '0')}$semanaNum";
+            label = "${semanaNum}ª S ${mesesNomes[dtObj.month]} ${dtObj.year}";
+          } else if (escalaSel == "Mensal") {
+            chaveSort = "${dtObj.year}${dtObj.month.toString().padLeft(2, '0')}";
+            label = "${mesesNomes[dtObj.month]} ${dtObj.year}";
+          } else if (escalaSel == "Bimestral") {
+            int bimestre = ((dtObj.month - 1) ~/ 2) + 1;
+            int mInicio = (bimestre - 1) * 2 + 1;
+            int mFim = mInicio + 1;
+            chaveSort = "${dtObj.year}$bimestre";
+            label = "$bimestreº Bim (${mesesNomes[mInicio]}-${mesesNomes[mFim]}) ${dtObj.year}";
+          } else if (escalaSel == "Trimestral") {
+            int trimestre = ((dtObj.month - 1) ~/ 3) + 1;
+            int mInicio = (trimestre - 1) * 3 + 1;
+            int mFim = mInicio + 2;
+            chaveSort = "${dtObj.year}$trimestre";
+            label = "$trimestreº Trim (${mesesNomes[mInicio]}-${mesesNomes[mFim]}) ${dtObj.year}";
+          } else if (escalaSel == "Semestral") {
+            int semestre = dtObj.month <= 6 ? 1 : 2;
+            int mInicio = semestre == 1 ? 1 : 7;
+            int mFim = semestre == 1 ? 6 : 12;
+            chaveSort = "${dtObj.year}$semestre";
+            label = "$semestreº Sem (${mesesNomes[mInicio]}-${mesesNomes[mFim]}) ${dtObj.year}";
+          } else if (escalaSel == "Anual") {
+            chaveSort = "${dtObj.year}";
+            label = "${dtObj.year}";
           }
-          agrupado[chave] = (agrupado[chave] ?? 0.0) + val;
+
+          if (!agrupado.containsKey(chaveSort)) {
+            agrupado[chaveSort] = {'sort': chaveSort, 'periodo': label, 'total': 0.0};
+          }
+          agrupado[chaveSort]!['total'] += val;
         } catch (_) {}
       }
 
-      List<Map<String, dynamic>> lista = agrupado.entries.map((e) => {'periodo': e.key, 'total': e.value}).toList();
-      lista.sort((a, b) => b['periodo'].compareTo(a['periodo']));
+      List<Map<String, dynamic>> lista = agrupado.values.toList();
+      lista.sort((a, b) => b['sort'].compareTo(a['sort']));
 
       if (!mounted) return;
       setState(() {
@@ -1471,7 +1661,7 @@ class _AbaEvolucaoGanhosMobileState extends State<AbaEvolucaoGanhosMobile> {
                     return Card(
                       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                       child: ListTile(
-                        title: Text('Período: ${item['periodo']}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        title: Text(item['periodo'], style: const TextStyle(fontWeight: FontWeight.bold)),
                         trailing: Text('R\$ ${item['total'].toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 16)),
                       ),
                     );
