@@ -1,4 +1,3 @@
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -788,19 +787,25 @@ class TelaAlunosMobile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 2,
+      length: 3,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Gestão de Alunos'),
           bottom: const TabBar(
+            isScrollable: true,
             tabs: [
               Tab(icon: Icon(Icons.group), text: 'Lista & Prontuário'),
               Tab(icon: Icon(Icons.person_add), text: 'Cadastrar'),
+              Tab(icon: Icon(Icons.card_giftcard), text: 'Comprar Pacote'),
             ],
           ),
         ),
         body: const TabBarView(
-          children: [AbaListaAlunosMobile(), AbaCadastrarAlunoMobile()],
+          children: [
+            AbaListaAlunosMobile(),
+            AbaCadastrarAlunoMobile(),
+            AbaComprarPacoteMobile(),
+          ],
         ),
       ),
     );
@@ -896,6 +901,11 @@ class _AbaListaAlunosMobileState extends State<AbaListaAlunosMobile> {
   List<Map<String, dynamic>> alunos = [];
   bool carregando = true;
 
+  final List<String> _anos = [
+    "5º Ano - Fund.", "6º Ano - Fund.", "7º Ano - Fund.", "8º Ano - Fund.", "9º Ano - Fund.",
+    "1ª Série - EM", "2ª Série - EM", "3ª Série - EM", "Pré-Vestibular / Superior"
+  ];
+
   @override
   void initState() {
     super.initState();
@@ -951,6 +961,71 @@ class _AbaListaAlunosMobileState extends State<AbaListaAlunosMobile> {
     );
   }
 
+  void editarAluno(Map<String, dynamic> aluno) {
+    final nomeCtrl = TextEditingController(text: aluno['nome'] ?? '');
+    final respCtrl = TextEditingController(text: aluno['responsavel'] ?? '');
+    final wppAlunoCtrl = TextEditingController(text: aluno['whatsapp_aluno'] ?? '');
+    final wppRespCtrl = TextEditingController(text: aluno['whatsapp_resp'] ?? '');
+    String anoSel = aluno['ano_escolar'] ?? '3ª Série - EM';
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setStateModal) => AlertDialog(
+          title: Text('Editar Aluno: ${aluno['nome']}'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(controller: nomeCtrl, decoration: const InputDecoration(labelText: 'Nome')),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  value: _anos.contains(anoSel) ? anoSel : _anos.first,
+                  decoration: const InputDecoration(labelText: 'Ano Escolar'),
+                  items: _anos.map((a) => DropdownMenuItem(value: a, child: Text(a))).toList(),
+                  onChanged: (v) => setStateModal(() => anoSel = v!),
+                ),
+                const SizedBox(height: 10),
+                TextField(controller: respCtrl, decoration: const InputDecoration(labelText: 'Responsável')),
+                const SizedBox(height: 10),
+                TextField(controller: wppAlunoCtrl, keyboardType: TextInputType.phone, inputFormatters: [PhoneInputFormatter()], decoration: const InputDecoration(labelText: 'WhatsApp Aluno')),
+                const SizedBox(height: 10),
+                TextField(controller: wppRespCtrl, keyboardType: TextInputType.phone, inputFormatters: [PhoneInputFormatter()], decoration: const InputDecoration(labelText: 'WhatsApp Responsável')),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
+            ElevatedButton(
+              onPressed: () async {
+                try {
+                  await supabase.from('alunos').update({
+                    'nome': nomeCtrl.text.trim(),
+                    'ano_escolar': anoSel,
+                    'responsavel': respCtrl.text.trim(),
+                    'whatsapp_aluno': wppAlunoCtrl.text.trim(),
+                    'whatsapp_resp': wppRespCtrl.text.trim(),
+                  }).eq('id', aluno['id']);
+
+                  if (context.mounted) Navigator.pop(context);
+                  carregarAlunos();
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aluno atualizado com sucesso!')));
+                  }
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erro ao atualizar: $e')));
+                  }
+                }
+              },
+              child: const Text('Salvar'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -971,6 +1046,10 @@ class _AbaListaAlunosMobileState extends State<AbaListaAlunosMobile> {
                       child: ListTile(
                         title: Text(al['nome'], style: const TextStyle(fontWeight: FontWeight.bold)),
                         subtitle: Text('Série: ${al['ano_escolar'] ?? '-'}\nResp: ${al['responsavel'] ?? '-'}'),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.edit, color: Colors.indigo),
+                          onPressed: () => editarAluno(al),
+                        ),
                         isThreeLine: true,
                         onTap: () => abrirProntuario(al),
                       ),
@@ -979,6 +1058,179 @@ class _AbaListaAlunosMobileState extends State<AbaListaAlunosMobile> {
                 ),
       floatingActionButton: FloatingActionButton(onPressed: carregarAlunos, tooltip: 'Atualizar', child: const Icon(Icons.refresh)),
     );
+  }
+}
+
+class AbaComprarPacoteMobile extends StatefulWidget {
+  const AbaComprarPacoteMobile({super.key});
+
+  @override
+  State<AbaComprarPacoteMobile> createState() => _AbaComprarPacoteMobileState();
+}
+
+class _AbaComprarPacoteMobileState extends State<AbaComprarPacoteMobile> {
+  final supabase = Supabase.instance.client;
+  List<Map<String, dynamic>> alunos = [];
+  List<Map<String, dynamic>> pacotesDisponiveis = [];
+  String? alunoSelecionado;
+  String? pacoteSelecionado;
+  DateTime dataInicio = DateTime.now();
+  DateTime dataFim = DateTime.now().add(const Duration(days: 30));
+  bool carregando = true;
+  bool salvando = false;
+
+  @override
+  void initState() {
+    super.initState();
+    carregarDados();
+  }
+
+  Future<void> carregarDados() async {
+    try {
+      final resAlunos = await supabase.from('alunos').select('nome').order('nome');
+      final resPacs = await supabase.from('pacotes_professor').select().eq('ativo', true);
+      
+      List<Map<String, dynamic>> pacs = List<Map<String, dynamic>>.from(resPacs).where((p) => (p['qtd_aulas'] ?? 1) > 1).toList();
+
+      if (!mounted) return;
+      setState(() {
+        alunos = List<Map<String, dynamic>>.from(resAlunos);
+        if (alunos.isNotEmpty) alunoSelecionado = alunos.first['nome'];
+        pacotesDisponiveis = pacs;
+        if (pacotesDisponiveis.isNotEmpty) {
+          pacoteSelecionado = pacotesDisponiveis.first['nome_pacote'];
+          atualizarDataFim();
+        }
+        carregando = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => carregando = false);
+    }
+  }
+
+  void atualizarDataFim() {
+    if (pacoteSelecionado == null) return;
+    try {
+      final pac = pacotesDisponiveis.firstWhere((p) => p['nome_pacote'] == pacoteSelecionado);
+      String periodicidade = pac['periodicidade'] ?? 'Mensal';
+      int diasAdd = 30;
+      if (periodicidade == 'Semanal') diasAdd = 7;
+      else if (periodicidade == 'Quinzenal') diasAdd = 15;
+      else if (periodicidade == 'Mensal') diasAdd = 30;
+      else if (periodicidade == 'Bimestral') diasAdd = 60;
+      else if (periodicidade == 'Trimestral') diasAdd = 90;
+      else if (periodicidade == 'Semestral') diasAdd = 180;
+
+      setState(() {
+        dataFim = dataInicio.add(Duration(days: diasAdd));
+      });
+    } catch (_) {}
+  }
+
+  Future<void> confirmarCompra() async {
+    if (alunoSelecionado == null || pacoteSelecionado == null) return;
+    setState(() => salvando = true);
+    try {
+      final pac = pacotesDisponiveis.firstWhere((p) => p['nome_pacote'] == pacoteSelecionado);
+      double valorTotal = double.tryParse(pac['valor_total'].toString()) ?? 0.0;
+      String dataIniStr = "${dataInicio.day.toString().padLeft(2, '0')}/${dataInicio.month.toString().padLeft(2, '0')}/${dataInicio.year}";
+      String dataFimStr = "${dataFim.day.toString().padLeft(2, '0')}/${dataFim.month.toString().padLeft(2, '0')}/${dataFim.year}";
+
+      await supabase.from('pacotes_comprados').insert({
+        'aluno': alunoSelecionado,
+        'pacote': pacoteSelecionado,
+        'data_inicio': dataIniStr,
+        'data_fim': dataFimStr,
+        'valor_total': valorTotal,
+      });
+
+      double valorMetade = valorTotal / 2.0;
+      await supabase.from('cobrancas').insert([
+        {
+          'aluno': alunoSelecionado,
+          'descricao': 'Sinal 50% - $pacoteSelecionado ($alunoSelecionado)',
+          'valor': valorMetade,
+          'vencimento': dataInicio.toString().substring(0, 10),
+          'status': 'Pendente',
+        },
+        {
+          'aluno': alunoSelecionado,
+          'descricao': 'Quitação 50% - $pacoteSelecionado ($alunoSelecionado)',
+          'valor': valorMetade,
+          'vencimento': dataFim.toString().substring(0, 10),
+          'status': 'Pendente',
+        }
+      ]);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Pacote comprado com sucesso! 2 cobranças de 50% geradas.')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erro: $e')));
+    } finally {
+      if (mounted) setState(() => salvando = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return carregando
+        ? const Center(child: CircularProgressIndicator())
+        : SingleChildScrollView(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                alunos.isEmpty
+                    ? const Text('Cadastre alunos primeiro.', style: TextStyle(color: Colors.red))
+                    : DropdownButtonFormField<String>(
+                        value: alunoSelecionado,
+                        decoration: const InputDecoration(labelText: 'Aluno', border: OutlineInputBorder()),
+                        items: alunos.map((a) => DropdownMenuItem(value: a['nome'].toString(), child: Text(a['nome'].toString()))).toList(),
+                        onChanged: (v) => setState(() => alunoSelecionado = v),
+                      ),
+                const SizedBox(height: 14),
+                pacotesDisponiveis.isEmpty
+                    ? const Text('Cadastre pacotes/modalidades com mais de 1 aula na aba Preços.', style: TextStyle(color: Colors.red))
+                    : DropdownButtonFormField<String>(
+                        value: pacoteSelecionado,
+                        decoration: const InputDecoration(labelText: 'Pacote Disponível', border: OutlineInputBorder()),
+                        items: pacotesDisponiveis.map((p) => DropdownMenuItem(value: p['nome_pacote'].toString(), child: Text(p['nome_pacote'].toString()))).toList(),
+                        onChanged: (v) {
+                          setState(() => pacoteSelecionado = v);
+                          atualizarDataFim();
+                        },
+                      ),
+                const SizedBox(height: 14),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final picked = await showDatePicker(
+                      context: context,
+                      initialDate: dataInicio,
+                      firstDate: DateTime(2025),
+                      lastDate: DateTime(2030),
+                    );
+                    if (picked != null) {
+                      setState(() => dataInicio = picked);
+                      atualizarDataFim();
+                    }
+                  },
+                  icon: const Icon(Icons.calendar_month),
+                  label: Text('Início: ${dataInicio.toString().substring(0, 10)}'),
+                ),
+                const SizedBox(height: 14),
+                InputDecorator(
+                  decoration: const InputDecoration(labelText: 'Fim Calculado (Automático)', border: OutlineInputBorder()),
+                  child: Text(dataFim.toString().substring(0, 10), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                ),
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  onPressed: salvando || alunos.isEmpty || pacotesDisponiveis.isEmpty ? null : confirmarCompra,
+                  child: Text(salvando ? 'Processando...' : '💳 Confirmar Compra (Gera 2x 50%)'),
+                ),
+              ],
+            ),
+          );
   }
 }
 
@@ -1027,7 +1279,7 @@ class _AbaControleAulasMobileState extends State<AbaControleAulasMobile> {
   final supabase = Supabase.instance.client;
   List<Map<String, dynamic>> aulas = [];
   bool carregando = true;
-  String filtroStatus = 'Agendada'; // 'Agendada' ou 'Realizada'
+  String filtroStatus = 'Agendada';
 
   @override
   void initState() {
@@ -1213,7 +1465,7 @@ class _AbaCobrancasMobileState extends State<AbaCobrancasMobile> {
   final supabase = Supabase.instance.client;
   List<Map<String, dynamic>> cobrancas = [];
   bool carregando = true;
-  String filtroStatusCob = 'Todas'; // 'Todas', 'Pendente', 'Pago'
+  String filtroStatusCob = 'Todas';
 
   @override
   void initState() {
@@ -1230,7 +1482,6 @@ class _AbaCobrancasMobileState extends State<AbaCobrancasMobile> {
       final res = await query;
       List<Map<String, dynamic>> lista = List<Map<String, dynamic>>.from(res);
 
-      // Ordem cronológica por data de vencimento
       lista.sort((a, b) {
         try {
           DateTime dtA = DateTime.parse(a['vencimento'].split('/').reversed.join('-'));
@@ -1581,19 +1832,19 @@ class _AbaEvolucaoGanhosMobileState extends State<AbaEvolucaoGanhosMobile> {
             int mInicio = (bimestre - 1) * 2 + 1;
             int mFim = mInicio + 1;
             chaveSort = "${dtObj.year}$bimestre";
-            label = "$bimestreº Bim (${mesesNomes[mInicio]}-${mesesNomes[mFim]}) ${dtObj.year}";
+            label = "${mesesNomes[mInicio]}-${mesesNomes[mFim]} ${dtObj.year}";
           } else if (escalaSel == "Trimestral") {
             int trimestre = ((dtObj.month - 1) ~/ 3) + 1;
             int mInicio = (trimestre - 1) * 3 + 1;
             int mFim = mInicio + 2;
             chaveSort = "${dtObj.year}$trimestre";
-            label = "$trimestreº Trim (${mesesNomes[mInicio]}-${mesesNomes[mFim]}) ${dtObj.year}";
+            label = "${mesesNomes[mInicio]}-${mesesNomes[mFim]} ${dtObj.year}";
           } else if (escalaSel == "Semestral") {
             int semestre = dtObj.month <= 6 ? 1 : 2;
             int mInicio = semestre == 1 ? 1 : 7;
             int mFim = semestre == 1 ? 6 : 12;
             chaveSort = "${dtObj.year}$semestre";
-            label = "$semestreº Sem (${mesesNomes[mInicio]}-${mesesNomes[mFim]}) ${dtObj.year}";
+            label = "${mesesNomes[mInicio]}-${mesesNomes[mFim]} ${dtObj.year}";
           } else if (escalaSel == "Anual") {
             chaveSort = "${dtObj.year}";
             label = "${dtObj.year}";
