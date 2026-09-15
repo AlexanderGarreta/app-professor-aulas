@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:add_2_calendar/add_2_calendar.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -37,13 +39,13 @@ class PhoneInputFormatter extends TextInputFormatter {
     final text = newValue.text.replaceAll(RegExp(r'\D'), '');
     String formatted = '';
     if (text.isNotEmpty) {
-      formatted += '(' + text.substring(0, text.length >= 2 ? 2 : text.length);
+      formatted += '(${text.substring(0, text.length >= 2 ? 2 : text.length)}';
     }
     if (text.length >= 3) {
-      formatted += ') ' + text.substring(2, text.length >= 7 ? 7 : text.length);
+      formatted += ') ${text.substring(2, text.length >= 7 ? 7 : text.length)}';
     }
     if (text.length >= 8) {
-      formatted += '-' + text.substring(7, text.length >= 11 ? 11 : text.length);
+      formatted += '-${text.substring(7, text.length >= 11 ? 11 : text.length)}';
     }
     return TextEditingValue(
       text: formatted,
@@ -66,7 +68,7 @@ class _HomeMobilePageState extends State<HomeMobilePage> {
     const TelaAgendaMobile(),
     const TelaPrecosMobile(),
     const TelaAlunosMobile(),
-    const TelaPainelGanhosMobile(),
+    const TelaGestaoMasterMobile(),
     const TelaConfiguracoesMobile(),
   ];
 
@@ -86,7 +88,7 @@ class _HomeMobilePageState extends State<HomeMobilePage> {
           BottomNavigationBarItem(icon: Icon(Icons.calendar_today), label: 'Agenda'),
           BottomNavigationBarItem(icon: Icon(Icons.attach_money), label: 'Preços'),
           BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Alunos'),
-          BottomNavigationBarItem(icon: Icon(Icons.bar_chart), label: 'Ganhos'),
+          BottomNavigationBarItem(icon: Icon(Icons.assessment), label: 'Gestão'),
           BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Ajustes'),
         ],
       ),
@@ -94,7 +96,7 @@ class _HomeMobilePageState extends State<HomeMobilePage> {
   }
 }
 
-// ================= TELA 1: AGENDA (Aulas Futuras, Calendário Nativo & Ações Rápidas) =================
+// ================= TELA 1: AGENDA & GOOGLE CALENDAR API =================
 class TelaAgendaMobile extends StatefulWidget {
   const TelaAgendaMobile({super.key});
 
@@ -107,6 +109,10 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
   List<Map<String, dynamic>> aulas = [];
   bool carregando = true;
 
+  final GoogleSignIn _googleSignIn = GoogleSignIn(
+    scopes: ['https://www.googleapis.com/auth/calendar.events'],
+  );
+
   @override
   void initState() {
     super.initState();
@@ -118,11 +124,26 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
       final response = await supabase
           .from('aulas')
           .select()
-          .eq('status_aula', 'Agendada')
-          .order('data_aula', ascending: true);
+          .eq('status_aula', 'Agendada');
+      
+      List<Map<String, dynamic>> lista = List<Map<String, dynamic>>.from(response);
+
+      // Ordenar cronologicamente por Data e Horário
+      lista.sort((a, b) {
+        try {
+          DateTime dtA = DateTime.parse(a['data_aula'].split('/').reversed.join('-'));
+          DateTime dtB = DateTime.parse(b['data_aula'].split('/').reversed.join('-'));
+          int cmp = dtA.compareTo(dtB);
+          if (cmp != 0) return cmp;
+          return (a['horario'] ?? '00:00').compareTo(b['horario'] ?? '00:00');
+        } catch (_) {
+          return 0;
+        }
+      });
+
       if (!mounted) return;
       setState(() {
-        aulas = List<Map<String, dynamic>>.from(response);
+        aulas = lista;
         carregando = false;
       });
     } catch (_) {
@@ -130,40 +151,96 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
     }
   }
 
-  Future<void> mudarStatusComRegra(int id, String statusBase) async {
-    if (statusBase == 'Cancelada') {
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Regra de Cancelamento'),
-          content: const Text('Este cancelamento possui cobrança de taxa de 50% ou é isento?'),
-          actions: [
-            TextButton(
-              onPressed: () async {
-                Navigator.pop(context);
-                await supabase.from('aulas').update({'status_aula': 'Cancelada (Sem Cobrança)'}).eq('id', id);
-                carregarAulas();
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aula cancelada sem cobrança.')));
-              },
-              child: const Text('Sem Cobrança'),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                Navigator.pop(context);
-                await supabase.from('aulas').update({'status_aula': 'Cancelada (Com Cobrança 50%)'}).eq('id', id);
-                carregarAulas();
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cancelado com taxa de 50% registrada.')));
-              },
-              child: const Text('Com Cobrança (50%)'),
-            ),
-          ],
-        ),
+  Future<void> adicionarAoGoogleCalendar({
+    required String titulo,
+    required String descricao,
+    required DateTime inicio,
+    required DateTime fim,
+  }) async {
+    try {
+      GoogleSignInAccount? account = _googleSignIn.currentUser;
+      account ??= await _googleSignIn.signIn();
+
+      if (account == null) return;
+
+      final auth = await account.authHeaders;
+      final accessToken = auth['Authorization'];
+
+      if (accessToken == null) return;
+
+      final url = Uri.parse('https://www.googleapis.com/calendar/v3/calendars/primary/events');
+      
+      final body = jsonEncode({
+        'summary': titulo,
+        'description': descricao,
+        'start': {'dateTime': inicio.toIso8601String(), 'timeZone': 'America/Sao_Paulo'},
+        'end': {'dateTime': fim.toIso8601String(), 'timeZone': 'America/Sao_Paulo'},
+      });
+
+      await http.post(
+        url,
+        headers: {
+          'Authorization': accessToken,
+          'Content-Type': 'application/json',
+        },
+        body: body,
       );
-    } else {
-      await supabase.from('aulas').update({'status_aula': 'Realizada'}).eq('id', id);
+    } catch (e) {
+      debugPrint("Erro ao sincronizar com Google Calendar API: $e");
+    }
+  }
+
+  Future<void> mudarStatusComRegra(int id, String novoStatus) async {
+    try {
+      final resAula = await supabase.from('aulas').select().eq('id', id).maybeSingle();
+      if (resAula == null) return;
+
+      String aluno = resAula['aluno'];
+      String pacote = resAula['pacote'] ?? 'Avulsa';
+      String dataAula = resAula['data_aula'] ?? '';
+
+      if (novoStatus == 'Falta sem Aviso') {
+        double valorFalta = 110.0;
+        final resPac = await supabase.from('pacotes_professor').select().eq('nome_pacote', pacote).maybeSingle();
+        if (resPac != null) {
+          double total = double.tryParse(resPac['valor_total'].toString()) ?? 110.0;
+          int qtd = int.tryParse(resPac['qtd_aulas'].toString()) ?? 1;
+          valorFalta = total / (qtd > 0 ? qtd : 1);
+        }
+
+        await supabase.from('cobrancas').insert({
+          'aluno': aluno,
+          'descricao': 'Falta s/ Aviso ($dataAula) - $pacote',
+          'valor': valorFalta,
+          'vencimento': DateTime.now().toString().substring(0, 10),
+          'status': 'Pendente',
+        });
+
+        await supabase.from('aulas').delete().eq('id', id);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Falta registrada e convertida em cobrança financeira.')));
+      } else if (novoStatus == 'Cancelada com Reposição') {
+        await supabase.from('creditos_reposicao').insert({
+          'aluno': aluno,
+          'detalhes': 'Reposição gerada por cancelamento em $dataAula',
+          'status': 'Disponível',
+        });
+        await supabase.from('aulas').delete().eq('id', id);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Crédito de reposição gerado e aula removida.')));
+      } else if (novoStatus == 'Cancelada sem Cobrança') {
+        await supabase.from('aulas').delete().eq('id', id);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aula cancelada sem ônus.')));
+      } else {
+        await supabase.from('aulas').update({'status_aula': 'Realizada'}).eq('id', id);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aula marcada como Realizada!')));
+      }
+
       carregarAulas();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aula marcada como Realizada e enviada ao histórico!')));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erro: $e')));
     }
   }
 
@@ -186,22 +263,60 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
 
   void abrirModalNovaAula() async {
     List<Map<String, dynamic>> listaAlunos = [];
-    List<Map<String, dynamic>> listaPacotes = [];
     try {
       final resAlunos = await supabase.from('alunos').select('nome');
-      final resPacotes = await supabase.from('pacotes_professor').select('nome_pacote').eq('ativo', true);
       listaAlunos = List<Map<String, dynamic>>.from(resAlunos);
-      listaPacotes = List<Map<String, dynamic>>.from(resPacotes);
     } catch (_) {}
 
     if (!mounted) return;
 
     String? alunoSelecionado = listaAlunos.isNotEmpty ? listaAlunos.first['nome']?.toString() : null;
-    String? pacoteSelecionado = listaPacotes.isNotEmpty ? listaPacotes.first['nome_pacote']?.toString() : null;
+    List<String> modalidadesAluno = ['Avulsa 1h'];
+    String? modalidadeSelecionada = 'Avulsa 1h';
     String disciplina = 'Química';
     DateTime dataSel = DateTime.now();
     TimeOfDay horaSel = const TimeOfDay(hour: 14, minute: 0);
-    final assuntoCtrl = TextEditingController(text: 'Acompanhamento');
+    
+    List<String> assuntosDisponiveis = [];
+    String? assuntoSelecionado;
+    final novoAssuntoCtrl = TextEditingController();
+
+    Future<void> carregarAssuntosDinamicos(String disc, StateSetter setStateModal) async {
+      try {
+        final resTopicos = await supabase.from('topicos').select('assunto').eq('disciplina', disc);
+        List<String> tops = resTopicos.map<String>((t) => t['assunto'].toString()).toList();
+        setStateModal(() {
+          assuntosDisponiveis = tops;
+          assuntoSelecionado = tops.isNotEmpty ? tops.first : null;
+        });
+      } catch (_) {}
+    }
+
+    Future<void> atualizarModalidades(String aluno, StateSetter setStateModal) async {
+      List<String> opcs = [];
+      try {
+        final resPacs = await supabase.from('pacotes_professor').select('nome_pacote, qtd_aulas').eq('ativo', true);
+        for (var p in resPacs) {
+          if ((p['qtd_aulas'] ?? 1) == 1) opcs.add(p['nome_pacote'].toString());
+        }
+        final resComprados = await supabase.from('pacotes_comprados').select('pacote').eq('aluno', aluno);
+        for (var c in resComprados) {
+          String pac = c['pacote'].toString();
+          if (!opcs.contains(pac)) opcs.add(pac);
+        }
+      } catch (_) {}
+
+      if (opcs.isEmpty) opcs.add('Avulsa 1h');
+      setStateModal(() {
+        modalidadesAluno = opcs;
+        modalidadeSelecionada = opcs.first;
+      });
+    }
+
+    if (alunoSelecionado != null) {
+      await atualizarModalidades(alunoSelecionado, (fn) => fn());
+    }
+    await carregarAssuntosDinamicos(disciplina, (fn) => fn());
 
     showDialog(
       context: context,
@@ -214,28 +329,75 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 listaAlunos.isEmpty
-                    ? const Text('Cadastre alunos na aba Alunos primeiro.', style: TextStyle(color: Colors.red))
+                    ? const Text('Cadastre alunos primeiro.', style: TextStyle(color: Colors.red))
                     : DropdownButtonFormField<String>(
                         value: alunoSelecionado,
                         decoration: const InputDecoration(labelText: 'Aluno'),
                         items: listaAlunos.map((a) => DropdownMenuItem(value: a['nome'].toString(), child: Text(a['nome'].toString()))).toList(),
-                        onChanged: (v) => setStateModal(() => alunoSelecionado = v),
+                        onChanged: (v) async {
+                          setStateModal(() => alunoSelecionado = v);
+                          if (v != null) await atualizarModalidades(v, setStateModal);
+                        },
                       ),
                 const SizedBox(height: 10),
                 DropdownButtonFormField<String>(
-                  value: pacoteSelecionado,
-                  decoration: const InputDecoration(labelText: 'Pacote / Contrato (Opcional)'),
-                  items: listaPacotes.map((p) => DropdownMenuItem(value: p['nome_pacote'].toString(), child: Text(p['nome_pacote'].toString()))).toList(),
-                  onChanged: (v) => setStateModal(() => pacoteSelecionado = v),
+                  value: modalidadeSelecionada,
+                  decoration: const InputDecoration(labelText: 'Modalidade (Avulsa ou Pacote)'),
+                  items: modalidadesAluno.map((m) => DropdownMenuItem(value: m, child: Text(m))).toList(),
+                  onChanged: (v) => setStateModal(() => modalidadeSelecionada = v),
                 ),
                 const SizedBox(height: 10),
                 DropdownButtonFormField<String>(
                   value: disciplina,
                   decoration: const InputDecoration(labelText: 'Disciplina'),
-                  items: ['Química', 'Física', 'Matemática', 'Biologia', 'Redação', 'Português']
-                      .map((d) => DropdownMenuItem(value: d, child: Text(d)))
-                      .toList(),
-                  onChanged: (v) => setStateModal(() => disciplina = v!),
+                  items: DISCIPLINAS.map((d) => DropdownMenuItem(value: d, child: Text(d))).toList(),
+                  onChanged: (v) async {
+                    if (v != null) {
+                      setStateModal(() => disciplina = v);
+                      await carregarAssuntosDinamicos(v, setStateModal);
+                    }
+                  },
+                ),
+                const SizedBox(height: 10),
+                assuntosDisponiveis.isEmpty
+                    ? const Text('Nenhum assunto cadastrado para esta disciplina.')
+                    : DropdownButtonFormField<String>(
+                        value: assuntoSelecionado,
+                        decoration: const InputDecoration(labelText: 'Assunto do Acervo'),
+                        items: assuntosDisponiveis.map((as) => DropdownMenuItem(value: as, child: Text(as))).toList(),
+                        onChanged: (v) => setStateModal(() => assuntoSelecionado = v),
+                      ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: novoAssuntoCtrl,
+                        decoration: const InputDecoration(labelText: 'Ou cadastrar novo assunto'),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.add_circle, color: Colors.indigo),
+                      onPressed: () async {
+                        String novo = novoAssuntoCtrl.text.trim();
+                        if (novo.isNotEmpty) {
+                          try {
+                            await supabase.from('topicos').insert({'disciplina': disciplina, 'assunto': novo});
+                            novoAssuntoCtrl.clear();
+                            await carregarAssuntosDinamicos(disciplina, setStateModal);
+                            setStateModal(() => assuntoSelecionado = novo);
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Assunto adicionado e salvo com sucesso!')));
+                            }
+                          } catch (e) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erro ao salvar assunto: $e')));
+                            }
+                          }
+                        }
+                      },
+                    )
+                  ],
                 ),
                 const SizedBox(height: 10),
                 OutlinedButton.icon(
@@ -263,8 +425,6 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
                   icon: const Icon(Icons.access_time),
                   label: Text('Horário: ${horaSel.format(context)}'),
                 ),
-                const SizedBox(height: 10),
-                TextField(controller: assuntoCtrl, decoration: const InputDecoration(labelText: 'Tópico / Assunto')),
               ],
             ),
           ),
@@ -274,49 +434,66 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
               onPressed: listaAlunos.isEmpty || alunoSelecionado == null
                   ? null
                   : () async {
-                      String dataStr = dataSel.toString().substring(0, 10);
+                      String assuntoFinal = assuntoSelecionado ?? 'Geral';
+                      if (modalidadeSelecionada != null && !modalidadeSelecionada!.startsWith('Avulsa')) {
+                        final resPacInfo = await supabase.from('pacotes_professor').select('qtd_aulas').eq('nome_pacote', modalidadeSelecionada!).maybeSingle();
+                        if (resPacInfo != null) {
+                          int qtdMax = int.tryParse(resPacInfo['qtd_aulas'].toString()) ?? 1;
+                          final resAulasCad = await supabase.from('aulas').select('id').eq('aluno', alunoSelecionado!).eq('pacote', modalidadeSelecionada!);
+                          int jaCadastradas = resAulasCad.length;
+                          if (jaCadastradas >= qtdMax) {
+                            if (!context.mounted) return;
+                            Navigator.pop(context);
+                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Limite de aulas deste pacote esgotado!')));
+                            return;
+                          }
+                        }
+                      }
+
+                      String dataStr = "${dataSel.day.toString().padLeft(2, '0')}/${dataSel.month.toString().padLeft(2, '0')}/${dataSel.year}";
                       String horaStr = "${horaSel.hour.toString().padLeft(2, '0')}:${horaSel.minute.toString().padLeft(2, '0')}";
 
-                      // 1. Salva na Nuvem (Supabase)
+                      if (modalidadeSelecionada != null && modalidadeSelecionada!.startsWith('Avulsa')) {
+                        double valAvulsa = 110.0;
+                        final resPac = await supabase.from('pacotes_professor').select('valor_total').eq('nome_pacote', modalidadeSelecionada!).maybeSingle();
+                        if (resPac != null) valAvulsa = double.tryParse(resPac['valor_total'].toString()) ?? 110.0;
+
+                        await supabase.from('cobrancas').insert({
+                          'aluno': alunoSelecionado,
+                          'descricao': 'Aula Avulsa $disciplina ($dataStr) - $alunoSelecionado',
+                          'valor': valAvulsa,
+                          'vencimento': DateTime.now().toString().substring(0, 10),
+                          'status': 'Pendente',
+                        });
+                      }
+
                       await supabase.from('aulas').insert({
                         'aluno': alunoSelecionado,
-                        'pacote': pacoteSelecionado ?? 'Avulsa',
+                        'pacote': modalidadeSelecionada ?? 'Avulsa',
                         'disciplina': disciplina,
                         'data_aula': dataStr,
                         'horario': horaStr,
-                        'assunto': assuntoCtrl.text.trim(),
+                        'assunto': assuntoFinal,
                         'status_aula': 'Agendada',
                       });
 
-                      // 2. Sincroniza com o Calendário Nativo do Celular
                       try {
-                        final DateTime horaInicio = DateTime(
-                          dataSel.year,
-                          dataSel.month,
-                          dataSel.day,
-                          horaSel.hour,
-                          horaSel.minute,
-                        );
+                        final DateTime horaInicio = DateTime(dataSel.year, dataSel.month, dataSel.day, horaSel.hour, horaSel.minute);
                         final DateTime horaFim = horaInicio.add(const Duration(hours: 1));
-
-                        final eventoCalendario = Event(
-                          title: 'Aula de $disciplina - $alunoSelecionado',
-                          description: 'Assunto: ${assuntoCtrl.text.trim()} | Tipo: ${pacoteSelecionado ?? 'Avulsa'}',
-                          location: 'Presencial / Online',
-                          startDate: horaInicio,
-                          endDate: horaFim,
-                          allDay: false,
+                        await adicionarAoGoogleCalendar(
+                          titulo: 'Aula de $disciplina - $alunoSelecionado',
+                          descricao: 'Assunto: $assuntoFinal | Modalidade: $modalidadeSelecionada',
+                          inicio: horaInicio,
+                          fim: horaFim,
                         );
-
-                        Add2Calendar.addEvent2Cal(eventoCalendario);
                       } catch (e) {
-                        debugPrint("Erro ao abrir calendário nativo: $e");
+                        debugPrint("Erro ao enviar para Google Agenda: $e");
                       }
 
                       if (!mounted) return;
                       Navigator.pop(context);
                       carregarAulas();
-                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aula agendada e enviada ao calendário!')));
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Aula agendada e salva no Google Agenda!')));
                     },
               child: const Text('Salvar'),
             ),
@@ -329,11 +506,29 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Agenda (Aulas Futuras)')),
+      appBar: AppBar(
+        title: const Text('Agenda (Aulas Futuras)'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.login),
+            tooltip: 'Conectar Google Conta',
+            onPressed: () async {
+              try {
+                await _googleSignIn.signIn();
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Conta Google conectada com sucesso!')));
+              } catch (e) {
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erro ao conectar: $e')));
+              }
+            },
+          ),
+        ],
+      ),
       body: carregando
           ? const Center(child: CircularProgressIndicator())
           : aulas.isEmpty
-              ? const Center(child: Text('Nenhuma aula agendada para vir.'))
+              ? const Center(child: Text('Nenhuma aula agendada.'))
               : ListView.builder(
                   itemCount: aulas.length,
                   itemBuilder: (context, index) {
@@ -354,7 +549,7 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
                             ),
                             const SizedBox(height: 6),
                             Text('Disciplina: ${a['disciplina']} | Assunto: ${a['assunto']}'),
-                            Text('Tipo: ${a['pacote']}'),
+                            Text('Modalidade: ${a['pacote']}'),
                             const Divider(height: 16),
                             Row(
                               mainAxisAlignment: MainAxisAlignment.end,
@@ -365,10 +560,14 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
                                   icon: const Icon(Icons.check, color: Colors.indigo, size: 18),
                                   label: const Text('Realizada'),
                                 ),
-                                TextButton.icon(
-                                  onPressed: () => mudarStatusComRegra(a['id'], 'Cancelada'),
-                                  icon: const Icon(Icons.close, color: Colors.red, size: 18),
-                                  label: const Text('Cancelar'),
+                                PopupMenuButton<String>(
+                                  onSelected: (val) => mudarStatusComRegra(a['id'], val),
+                                  itemBuilder: (context) => [
+                                    const PopupMenuItem(value: 'Falta sem Aviso', child: Text('Falta (Gera Cobrança)')),
+                                    const PopupMenuItem(value: 'Cancelada com Reposição', child: Text('Cancelar c/ Reposição')),
+                                    const PopupMenuItem(value: 'Cancelada sem Cobrança', child: Text('Cancelar s/ Cobrança')),
+                                  ],
+                                  child: const Text('Outros', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
                                 ),
                               ],
                             ),
@@ -388,57 +587,39 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
 }
 
 // ================= TELA 2: PREÇOS & PACOTES =================
-class TelaPrecosMobile extends StatefulWidget {
+class TelaPrecosMobile extends StatelessWidget {
   const TelaPrecosMobile({super.key});
 
   @override
-  State<TelaPrecosMobile> createState() => _TelaPrecosMobileState();
-}
-
-class _TelaPrecosMobileState extends State<TelaPrecosMobile> with SingleTickerProviderStateMixin {
-  late TabController _tabController;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-  }
-
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Gestão de Preços'),
-        bottom: TabBar(
-          controller: _tabController,
-          tabs: const [
-            Tab(icon: Icon(Icons.list), text: 'Meus Preços'),
-            Tab(icon: Icon(Icons.add_box), text: 'Novo Pacote'),
-          ],
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Gestão de Preços'),
+          bottom: const TabBar(
+            tabs: [
+              Tab(icon: Icon(Icons.list), text: 'Modalidades'),
+              Tab(icon: Icon(Icons.add_box), text: 'Nova Modalidade'),
+            ],
+          ),
         ),
-      ),
-      body: TabBarView(
-        controller: _tabController,
-        children: const [AbaListaPrecos(), AbaNovoPacote()],
+        body: const TabBarView(
+          children: [AbaListaPrecosMobile(), AbaCriarPacoteMobile()],
+        ),
       ),
     );
   }
 }
 
-class AbaListaPrecos extends StatefulWidget {
-  const AbaListaPrecos({super.key});
+class AbaListaPrecosMobile extends StatefulWidget {
+  const AbaListaPrecosMobile({super.key});
 
   @override
-  State<AbaListaPrecos> createState() => _AbaListaPrecosState();
+  State<AbaListaPrecosMobile> createState() => _AbaListaPrecosMobileState();
 }
 
-class _AbaListaPrecosState extends State<AbaListaPrecos> {
+class _AbaListaPrecosMobileState extends State<AbaListaPrecosMobile> {
   final supabase = Supabase.instance.client;
   List<Map<String, dynamic>> pacotes = [];
   bool carregando = true;
@@ -451,7 +632,7 @@ class _AbaListaPrecosState extends State<AbaListaPrecos> {
 
   Future<void> carregarPacotes() async {
     try {
-      final response = await supabase.from('pacotes_professor').select().order('id', ascending: true);
+      final response = await supabase.from('pacotes_professor').select().eq('ativo', true).order('id', ascending: true);
       if (!mounted) return;
       setState(() {
         pacotes = List<Map<String, dynamic>>.from(response);
@@ -471,13 +652,12 @@ class _AbaListaPrecosState extends State<AbaListaPrecos> {
               itemCount: pacotes.length,
               itemBuilder: (context, index) {
                 final p = pacotes[index];
-                bool ativo = p['ativo'] ?? true;
                 return Card(
                   margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                   child: ListTile(
-                    title: Text(p['nome_pacote'], style: TextStyle(fontWeight: FontWeight.bold, color: ativo ? Colors.black : Colors.grey)),
-                    subtitle: Text('Aulas: ${p['qtd_aulas']} | ${p['duracao_min'] ?? 60} min'),
-                    trailing: Text("R\$ ${p['valor_total']}", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 15)),
+                    title: Text(p['nome_pacote'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: Text('Tipo: ${p['periodicidade'] ?? 'Avulsa'} | Aulas: ${p['qtd_aulas']} | ${p['duracao_min']} min'),
+                    trailing: Text("R\$ ${double.parse(p['valor_total'].toString()).toStringAsFixed(2)}", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 15)),
                   ),
                 );
               },
@@ -487,38 +667,63 @@ class _AbaListaPrecosState extends State<AbaListaPrecos> {
   }
 }
 
-class AbaNovoPacote extends StatefulWidget {
-  const AbaNovoPacote({super.key});
+class AbaCriarPacoteMobile extends StatefulWidget {
+  const AbaCriarPacoteMobile({super.key});
 
   @override
-  State<AbaNovoPacote> createState() => _AbaNovoPacoteState();
+  State<AbaCriarPacoteMobile> createState() => _AbaCriarPacoteMobileState();
 }
 
-class _AbaNovoPacoteState extends State<AbaNovoPacote> {
+class _AbaCriarPacoteMobileState extends State<AbaCriarPacoteMobile> {
   final supabase = Supabase.instance.client;
-  final _nomeController = TextEditingController();
-  final _qtdController = TextEditingController(text: '4');
+  final List<String> periodicidades = ["Avulsa", "Semanal", "Quinzenal", "Mensal", "Bimestral", "Trimestral", "Semestral"];
+  final List<String> duracoes = ["30", "45", "60", "75", "90", "105", "120", "135", "150", "165", "180"];
+  
+  String tipoSel = "Mensal";
+  int qtdAulas = 4;
+  String duracaoSel = "60";
   final _valorController = TextEditingController();
   bool salvando = false;
 
-  Future<void> salvarPacote() async {
-    final nome = _nomeController.text.trim();
+  String formatarDuracao(String minStr) {
+    int m = int.tryParse(minStr) ?? 60;
+    int h = m ~/ 60;
+    int r = m % 60;
+    if (h > 0 && r > 0) return '${h}h${r.toString().padLeft(2, '0')}';
+    if (h > 0) return '${h}h';
+    return '${r}min';
+  }
+
+  String get nomeAutomatico => '$tipoSel ${qtdAulas}x ${formatarDuracao(duracaoSel)}';
+
+  void sugerirPreco() {
+    double baseHora = 110.0;
+    double duracaoH = (int.tryParse(duracaoSel) ?? 60) / 60.0;
+    double bruto = qtdAulas * baseHora * duracaoH;
+    double desconto = qtdAulas > 1 ? (0.03 * qtdAulas).clamp(0.0, 0.25) : 0.0;
+    double piso = qtdAulas * baseHora * duracaoH * 0.75;
+    double sugerido = bruto * (1.0 - desconto);
+    if (sugerido < piso) sugerido = piso;
+    _valorController.text = sugerido.toStringAsFixed(2);
+  }
+
+  Future<void> salvarModalidade() async {
     final valorStr = _valorController.text.trim();
-    if (nome.isEmpty || valorStr.isEmpty) return;
+    if (valorStr.isEmpty) return;
 
     setState(() => salvando = true);
     try {
       await supabase.from('pacotes_professor').insert({
-        'nome_pacote': nome,
+        'nome_pacote': nomeAutomatico,
+        'periodicidade': tipoSel,
+        'qtd_aulas': qtdAulas,
+        'duracao_min': int.parse(duracaoSel),
         'valor_total': double.parse(valorStr),
-        'qtd_aulas': int.parse(_qtdController.text.trim()),
-        'duracao_min': 60,
         'ativo': true,
       });
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Pacote "$nome" criado com sucesso!')));
-      _nomeController.clear();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Modalidade "$nomeAutomatico" criada!')));
       _valorController.clear();
     } catch (e) {
       if (!mounted) return;
@@ -535,16 +740,40 @@ class _AbaNovoPacoteState extends State<AbaNovoPacote> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          TextField(controller: _nomeController, decoration: const InputDecoration(labelText: 'Nome do Pacote / Aula', border: OutlineInputBorder())),
+          DropdownButtonFormField<String>(
+            value: tipoSel,
+            decoration: const InputDecoration(labelText: 'Tipo / Periodicidade', border: OutlineInputBorder()),
+            items: periodicidades.map((p) => DropdownMenuItem(value: p, child: Text(p))).toList(),
+            onChanged: (v) => setState(() => tipoSel = v!),
+          ),
           const SizedBox(height: 12),
-          TextField(controller: _qtdController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Quantidade de Aulas', border: OutlineInputBorder())),
+          TextField(
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(labelText: 'Quantidade de Aulas (1 = Avulsa)', border: OutlineInputBorder()),
+            controller: TextEditingController(text: qtdAulas.toString())..selection = TextSelection.fromPosition(TextPosition(offset: qtdAulas.toString().length)),
+            onChanged: (v) => setState(() => qtdAulas = int.tryParse(v) ?? 1),
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            value: duracaoSel,
+            decoration: const InputDecoration(labelText: 'Duração da Aula', border: OutlineInputBorder()),
+            items: duracoes.map((d) => DropdownMenuItem(value: d, child: Text('$d minutos'))).toList(),
+            onChanged: (v) => setState(() => duracaoSel = v!),
+          ),
+          const SizedBox(height: 12),
+          InputDecorator(
+            decoration: const InputDecoration(labelText: 'Nome Automático da Modalidade', border: OutlineInputBorder()),
+            child: Text(nomeAutomatico, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.indigo)),
+          ),
           const SizedBox(height: 12),
           TextField(controller: _valorController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Valor Total (R\$)', border: OutlineInputBorder())),
-          const SizedBox(height: 20),
-          ElevatedButton.icon(
-            onPressed: salvando ? null : salvarPacote,
-            icon: const Icon(Icons.save),
-            label: Text(salvando ? 'Salvando...' : 'Salvar Novo Preço / Pacote'),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(child: OutlinedButton.icon(onPressed: sugerirPreco, icon: const Icon(Icons.lightbulb), label: const Text('Sugerir Preço'))),
+              const SizedBox(width: 8),
+              Expanded(child: ElevatedButton(onPressed: salvando ? null : salvarModalidade, child: Text(salvando ? 'Salvando...' : 'Salvar'))),
+            ],
           ),
         ],
       ),
@@ -553,57 +782,39 @@ class _AbaNovoPacoteState extends State<AbaNovoPacote> {
 }
 
 // ================= TELA 3: ALUNOS =================
-class TelaAlunosMobile extends StatefulWidget {
+class TelaAlunosMobile extends StatelessWidget {
   const TelaAlunosMobile({super.key});
 
   @override
-  State<TelaAlunosMobile> createState() => _TelaAlunosMobileState();
-}
-
-class _TelaAlunosMobileState extends State<TelaAlunosMobile> with SingleTickerProviderStateMixin {
-  late TabController _tabController;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-  }
-
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Gestão de Alunos'),
-        bottom: TabBar(
-          controller: _tabController,
-          tabs: const [
-            Tab(icon: Icon(Icons.group), text: 'Lista'),
-            Tab(icon: Icon(Icons.person_add), text: 'Cadastrar'),
-          ],
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Gestão de Alunos'),
+          bottom: const TabBar(
+            tabs: [
+              Tab(icon: Icon(Icons.group), text: 'Lista & Prontuário'),
+              Tab(icon: Icon(Icons.person_add), text: 'Cadastrar'),
+            ],
+          ),
         ),
-      ),
-      body: TabBarView(
-        controller: _tabController,
-        children: const [AbaListaAlunos(), AbaCadastrarAluno()],
+        body: const TabBarView(
+          children: [AbaListaAlunosMobile(), AbaCadastrarAlunoMobile()],
+        ),
       ),
     );
   }
 }
 
-class AbaCadastrarAluno extends StatefulWidget {
-  const AbaCadastrarAluno({super.key});
+class AbaCadastrarAlunoMobile extends StatefulWidget {
+  const AbaCadastrarAlunoMobile({super.key});
 
   @override
-  State<AbaCadastrarAluno> createState() => _AbaCadastrarAlunoState();
+  State<AbaCadastrarAlunoMobile> createState() => _AbaCadastrarAlunoMobileState();
 }
 
-class _AbaCadastrarAlunoState extends State<AbaCadastrarAluno> {
+class _AbaCadastrarAlunoMobileState extends State<AbaCadastrarAlunoMobile> {
   final supabase = Supabase.instance.client;
   final _nomeController = TextEditingController();
   final _respController = TextEditingController();
@@ -629,7 +840,6 @@ class _AbaCadastrarAlunoState extends State<AbaCadastrarAluno> {
         'responsavel': _respController.text.trim(),
         'whatsapp_aluno': _wppAlunoController.text.trim(),
         'whatsapp_resp': _wppRespController.text.trim(),
-        'status_pagamento': 'Não pago',
       });
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Aluno $nome salvo!')));
@@ -674,37 +884,30 @@ class _AbaCadastrarAlunoState extends State<AbaCadastrarAluno> {
   }
 }
 
-class AbaListaAlunos extends StatefulWidget {
-  const AbaListaAlunos({super.key});
+class AbaListaAlunosMobile extends StatefulWidget {
+  const AbaListaAlunosMobile({super.key});
 
   @override
-  State<AbaListaAlunos> createState() => _AbaListaAlunosState();
+  State<AbaListaAlunosMobile> createState() => _AbaListaAlunosMobileState();
 }
 
-class _AbaListaAlunosState extends State<AbaListaAlunos> {
+class _AbaListaAlunosMobileState extends State<AbaListaAlunosMobile> {
   final supabase = Supabase.instance.client;
   List<Map<String, dynamic>> alunos = [];
-  List<Map<String, dynamic>> pacotes = [];
-  List<Map<String, dynamic>> todasAulas = [];
   bool carregando = true;
 
   @override
   void initState() {
     super.initState();
-    carregarDados();
+    carregarAlunos();
   }
 
-  Future<void> carregarDados() async {
+  Future<void> carregarAlunos() async {
     try {
-      final resAlunos = await supabase.from('alunos').select().order('nome', ascending: true);
-      final resPacotes = await supabase.from('pacotes_professor').select();
-      final resAulas = await supabase.from('aulas').select();
-
+      final res = await supabase.from('alunos').select().order('nome', ascending: true);
       if (!mounted) return;
       setState(() {
-        alunos = List<Map<String, dynamic>>.from(resAlunos);
-        pacotes = List<Map<String, dynamic>>.from(resPacotes);
-        todasAulas = List<Map<String, dynamic>>.from(resAulas);
+        alunos = List<Map<String, dynamic>>.from(res);
         carregando = false;
       });
     } catch (_) {
@@ -712,145 +915,307 @@ class _AbaListaAlunosState extends State<AbaListaAlunos> {
     }
   }
 
-  void abrirPerfilAluno(Map<String, dynamic> aluno) {
-    String nomeAluno = aluno['nome'];
-    String statusPagamento = aluno['status_pagamento'] ?? 'Não pago';
+  void abrirProntuario(Map<String, dynamic> aluno) async {
+    String nome = aluno['nome'];
+    List<Map<String, dynamic>> aulas = [];
+    try {
+      final resAulas = await supabase.from('aulas').select().eq('aluno', nome);
+      aulas = List<Map<String, dynamic>>.from(resAulas);
+    } catch (_) {}
 
+    int total = aulas.length;
+    int feitas = aulas.where((a) => a['status_aula'] == 'Realizada').length;
+
+    if (!mounted) return;
     showDialog(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setStateModal) {
-          List<Map<String, dynamic>> aulasAluno = todasAulas.where((a) => a['aluno'] == nomeAluno).toList();
-          List<Map<String, dynamic>> aulasRealizadas = aulasAluno.where((a) => a['status_aula'] == 'Realizada').toList();
-          List<Map<String, dynamic>> aulasAtivas = aulasAluno.where((a) => a['status_aula'] == 'Agendada').toList();
+      builder: (context) => AlertDialog(
+        title: Text('Prontuário: $nome'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('• Ano Escolar: ${aluno['ano_escolar'] ?? '-'}'),
+            Text('• Responsável: ${aluno['responsavel'] ?? '-'}'),
+            Text('• Wpp Aluno: ${aluno['whatsapp_aluno'] ?? '-'}'),
+            Text('• Wpp Resp.: ${aluno['whatsapp_resp'] ?? '-'}'),
+            const Divider(),
+            Text('• Total de Aulas: $total'),
+            Text('• Aulas Realizadas: $feitas'),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Fechar')),
+        ],
+      ),
+    );
+  }
 
-          int totalDadas = aulasRealizadas.length;
-
-          String? pacoteAtivo;
-          for (var a in aulasAtivas) {
-            if (a['pacote'] != null && a['pacote'] != 'Avulsa') {
-              pacoteAtivo = a['pacote'];
-              break;
-            }
-          }
-
-          int qtdTotalPacote = 4;
-          double valorTotalPacote = 0.0;
-          if (pacoteAtivo != null) {
-            for (var p in pacotes) {
-              if (p['nome_pacote'] == pacoteAtivo) {
-                qtdTotalPacote = p['qtd_aulas'] ?? 4;
-                valorTotalPacote = double.tryParse(p['valor_total'].toString()) ?? 0.0;
-              }
-            }
-          }
-
-          int aulasRestantesPacote = qtdTotalPacote - totalDadas;
-          if (aulasRestantesPacote < 0) aulasRestantesPacote = 0;
-
-          double precoPorAula = qtdTotalPacote > 0 ? (valorTotalPacote / qtdTotalPacote) : 110.0;
-          double faturamentoAluno = totalDadas * precoPorAula;
-
-          return AlertDialog(
-            title: Text('Perfil: $nomeAluno'),
-            content: SizedBox(
-              width: double.maxFinite,
-              height: 450,
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Série: ${aluno['ano_escolar'] ?? '-'}'),
-                    Text('Responsável: ${aluno['responsavel'] ?? '-'}'),
-                    const Divider(),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text('Status Pagamento:', style: TextStyle(fontWeight: FontWeight.bold)),
-                        DropdownButton<String>(
-                          value: ['Não pago', 'Pago 50%', 'Pago 100%'].contains(statusPagamento) ? statusPagamento : 'Não pago',
-                          items: const [
-                            DropdownMenuItem(value: 'Não pago', child: Text('Não pago')),
-                            DropdownMenuItem(value: 'Pago 50%', child: Text('Pago 50%')),
-                            DropdownMenuItem(value: 'Pago 100%', child: Text('Pago 100%')),
-                          ],
-                          onChanged: (novoStatus) async {
-                            if (novoStatus != null) {
-                              await supabase.from('alunos').update({'status_pagamento': novoStatus}).eq('id', aluno['id']);
-                              setStateModal(() => statusPagamento = novoStatus);
-                              carregarDados();
-                            }
-                          },
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Card(
-                      color: Colors.indigo.shade50,
-                      child: Padding(
-                        padding: const EdgeInsets.all(10.0),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceAround,
-                          children: [
-                            Column(children: [Text('$totalDadas', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.indigo)), const Text('Dadas')]),
-                            Column(children: [Text(pacoteAtivo != null ? '$aulasRestantesPacote/$qtdTotalPacote' : 'Avulsa', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.blueGrey)), Text(pacoteAtivo != null ? 'Restantes' : 'Tipo')]),
-                            Column(children: [Text('R\$ ${faturamentoAluno.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.green)), const Text('Faturamento')]),
-                          ],
-                        ),
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Alunos Cadastrados (Total: ${alunos.length})'),
+        automaticallyImplyLeading: false,
+      ),
+      body: carregando
+          ? const Center(child: CircularProgressIndicator())
+          : alunos.isEmpty
+              ? const Center(child: Text('Nenhum aluno cadastrado.'))
+              : ListView.builder(
+                  itemCount: alunos.length,
+                  itemBuilder: (context, index) {
+                    final al = alunos[index];
+                    return Card(
+                      margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      child: ListTile(
+                        title: Text(al['nome'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                        subtitle: Text('Série: ${al['ano_escolar'] ?? '-'}\nResp: ${al['responsavel'] ?? '-'}'),
+                        isThreeLine: true,
+                        onTap: () => abrirProntuario(al),
                       ),
-                    ),
-                    const SizedBox(height: 12),
-                    const Text('Aulas Ativas (Agendadas para vir):', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
-                    const SizedBox(height: 4),
-                    aulasAtivas.isEmpty
-                        ? const Text('Nenhuma aula ativa no momento.', style: TextStyle(fontSize: 12, color: Colors.grey))
-                        : Column(
-                            children: aulasAtivas.map((au) {
-                              return Card(
-                                child: ListTile(
-                                  dense: true,
-                                  title: Text('${au['data_aula']} (${au['horario']}) - ${au['disciplina']}'),
-                                  subtitle: Text('Tipo: ${au['pacote']}'),
-                                  trailing: IconButton(
-                                    icon: const Icon(Icons.check_circle, color: Colors.green, size: 20),
-                                    tooltip: 'Marcar Realizada',
-                                    onPressed: () async {
-                                      await supabase.from('aulas').update({'status_aula': 'Realizada'}).eq('id', au['id']);
-                                      await carregarDados();
-                                      if (!context.mounted) return;
-                                      Navigator.pop(context);
-                                    },
-                                  ),
-                                ),
-                              );
-                            }).toList(),
-                          ),
-                    const SizedBox(height: 12),
-                    const Text('Histórico de Aulas Realizadas:', style: TextStyle(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 4),
-                    aulasRealizadas.isEmpty
-                        ? const Text('Nenhuma aula realizada ainda.', style: TextStyle(fontSize: 12, color: Colors.grey))
-                        : Column(
-                            children: aulasRealizadas.map((au) {
-                              return Card(
-                                child: ListTile(
-                                  dense: true,
-                                  title: Text('${au['data_aula']} - ${au['disciplina']}'),
-                                  subtitle: Text('Assunto: ${au['assunto'] ?? ''}'),
-                                  trailing: const Icon(Icons.check, color: Colors.indigo, size: 18),
-                                ),
-                              );
-                            }).toList(),
-                          ),
-                  ],
+                    );
+                  },
                 ),
-              ),
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context), child: const Text('Fechar')),
+      floatingActionButton: FloatingActionButton(onPressed: carregarAlunos, tooltip: 'Atualizar', child: const Icon(Icons.refresh)),
+    );
+  }
+}
+
+// ================= TELA 4: GESTÃO MASTER =================
+class TelaGestaoMasterMobile extends StatelessWidget {
+  const TelaGestaoMasterMobile({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 4,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Painel de Gestão'),
+          bottom: const TabBar(
+            isScrollable: true,
+            tabs: [
+              Tab(text: 'Controle de Aulas'),
+              Tab(text: 'Cobranças'),
+              Tab(text: 'Resumo Fin.'),
+              Tab(text: 'Evolução'),
             ],
-          );
-        },
+          ),
+        ),
+        body: const TabBarView(
+          children: [
+            AbaControleAulasMobile(),
+            AbaCobrancasMobile(),
+            AbaResumoGanhosMobile(),
+            AbaEvolucaoGanhosMobile(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class AbaControleAulasMobile extends StatefulWidget {
+  const AbaControleAulasMobile({super.key});
+
+  @override
+  State<AbaControleAulasMobile> createState() => _AbaControleAulasMobileState();
+}
+
+class _AbaControleAulasMobileState extends State<AbaControleAulasMobile> {
+  final supabase = Supabase.instance.client;
+  List<Map<String, dynamic>> aulas = [];
+  bool carregando = true;
+
+  @override
+  void initState() {
+    super.initState();
+    carregarAulas();
+  }
+
+  Future<void> carregarAulas() async {
+    try {
+      final res = await supabase.from('aulas').select();
+      List<Map<String, dynamic>> lista = List<Map<String, dynamic>>.from(res);
+
+      lista.sort((a, b) {
+        try {
+          DateTime dtA = DateTime.parse(a['data_aula'].split('/').reversed.join('-'));
+          DateTime dtB = DateTime.parse(b['data_aula'].split('/').reversed.join('-'));
+          int cmp = dtA.compareTo(dtB);
+          if (cmp != 0) return cmp;
+          return (a['horario'] ?? '00:00').compareTo(b['horario'] ?? '00:00');
+        } catch (_) {
+          return 0;
+        }
+      });
+
+      if (!mounted) return;
+      setState(() {
+        aulas = lista;
+        carregando = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => carregando = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: carregando
+          ? const Center(child: CircularProgressIndicator())
+          : aulas.isEmpty
+              ? const Center(child: Text('Nenhuma aula registrada.'))
+              : ListView.builder(
+                  itemCount: aulas.length,
+                  itemBuilder: (context, index) {
+                    final a = aulas[index];
+                    return Card(
+                      margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      child: ListTile(
+                        title: Text('${a['aluno']} - ${a['disciplina']}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        subtitle: Text('Data: ${a['data_aula']} às ${a['horario']}\nAssunto: ${a['assunto'] ?? ''}\nStatus: ${a['status_aula']}'),
+                        isThreeLine: true,
+                      ),
+                    );
+                  },
+                ),
+      floatingActionButton: FloatingActionButton(onPressed: carregarAulas, tooltip: 'Atualizar', child: const Icon(Icons.refresh)),
+    );
+  }
+}
+
+class AbaCobrancasMobile extends StatefulWidget {
+  const AbaCobrancasMobile({super.key});
+
+  @override
+  State<AbaCobrancasMobile> createState() => _AbaCobrancasMobileState();
+}
+
+class _AbaCobrancasMobileState extends State<AbaCobrancasMobile> {
+  final supabase = Supabase.instance.client;
+  List<Map<String, dynamic>> cobrancas = [];
+  bool carregando = true;
+
+  @override
+  void initState() {
+    super.initState();
+    carregarCobrancas();
+  }
+
+  Future<void> carregarCobrancas() async {
+    try {
+      final res = await supabase.from('cobrancas').select().order('id', ascending: false);
+      if (!mounted) return;
+      setState(() {
+        cobrancas = List<Map<String, dynamic>>.from(res);
+        carregando = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => carregando = false);
+    }
+  }
+
+  Future<void> mudarStatusCobranca(int id, String novoStatus) async {
+    await supabase.from('cobrancas').update({'status': novoStatus}).eq('id', id);
+    carregarCobrancas();
+  }
+
+  Future<void> excluirCobranca(int id) async {
+    await supabase.from('cobrancas').delete().eq('id', id);
+    carregarCobrancas();
+  }
+
+  Future<void> editarValor(Map<String, dynamic> c) async {
+    final controller = TextEditingController(text: c['valor'].toString());
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Editar Valor da Cobrança'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(labelText: 'Novo Valor (R\$)'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
+          ElevatedButton(
+            onPressed: () async {
+              double? val = double.tryParse(controller.text.replaceAll(',', '.'));
+              if (val != null) {
+                await supabase.from('cobrancas').update({'valor': val}).eq('id', c['id']);
+                if (context.mounted) Navigator.pop(context);
+                carregarCobrancas();
+              }
+            },
+            child: const Text('Salvar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> mandarCobrancaWhatsApp(Map<String, dynamic> c) async {
+    final aluno = c['aluno'];
+    final valor = double.tryParse(c['valor'].toString()) ?? 0.0;
+    final descricao = c['descricao'] ?? '';
+    final vencimento = c['vencimento'] ?? '';
+
+    String telefone = '';
+    try {
+      final resAluno = await supabase.from('alunos').select('whatsapp_resp, whatsapp_aluno').eq('nome', aluno).maybeSingle();
+      if (resAluno != null) {
+        telefone = resAluno['whatsapp_resp'] ?? resAluno['whatsapp_aluno'] ?? '';
+      }
+    } catch (_) {}
+
+    String chavePix = '';
+    try {
+      final resConfig = await supabase.from('configuracoes_professor').select('chave_pix').limit(1).maybeSingle();
+      if (resConfig != null) {
+        chavePix = resConfig['chave_pix'] ?? '';
+      }
+    } catch (_) {}
+
+    String mensagemPadrao = 'Olá! Passando para lembrar sobre a cobrança "$descricao" no valor de R\$ ${valor.toStringAsFixed(2)}, com vencimento em $vencimento.\n\nChave Pix para pagamento: ${chavePix.isNotEmpty ? chavePix : "(Não cadastrada)"}\n\nObrigado!';
+    final msgController = TextEditingController(text: mensagemPadrao);
+
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Cobrança: $aluno'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Personalize a mensagem:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+            const SizedBox(height: 10),
+            TextField(controller: msgController, maxLines: 6, decoration: const InputDecoration(border: OutlineInputBorder())),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.send, size: 16),
+            label: const Text('Enviar WhatsApp'),
+            onPressed: () async {
+              Navigator.pop(context);
+              if (telefone.isNotEmpty) {
+                final numLimpo = telefone.replaceAll(RegExp(r'\D'), '');
+                final url = Uri.parse('https://wa.me/55$numLimpo?text=${Uri.encodeComponent(msgController.text)}');
+                if (await canLaunchUrl(url)) {
+                  await launchUrl(url, mode: LaunchMode.externalApplication);
+                }
+              } else {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('WhatsApp do aluno não cadastrado.')));
+                }
+              }
+            },
+          ),
+        ],
       ),
     );
   }
@@ -860,125 +1225,203 @@ class _AbaListaAlunosState extends State<AbaListaAlunos> {
     return Scaffold(
       body: carregando
           ? const Center(child: CircularProgressIndicator())
-          : alunos.isEmpty
-              ? const Center(child: Text('Nenhum aluno cadastrado.'))
+          : cobrancas.isEmpty
+              ? const Center(child: Text('Nenhuma cobrança registrada.'))
               : ListView.builder(
-                  itemCount: alunos.length,
+                  itemCount: cobrancas.length,
                   itemBuilder: (context, index) {
-                    final al = alunos[index];
-                    String nome = al['nome'] ?? '';
-                    String pagamento = al['status_pagamento'] ?? 'Não pago';
-                    int concluidas = todasAulas.where((a) => a['aluno'] == nome && a['status_aula'] == 'Realizada').length;
-
+                    final c = cobrancas[index];
+                    bool pago = c['status'] == 'Pago';
                     return Card(
                       margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                       child: ListTile(
-                        title: Row(
-                          children: [
-                            Text(nome, style: const TextStyle(fontWeight: FontWeight.bold)),
-                            const SizedBox(width: 8),
-                            Text('($pagamento)', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                        title: Text(c['aluno'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                        subtitle: Text('${c['descricao']}\nVencimento: ${c['vencimento']} | Status: ${c['status']}'),
+                        trailing: PopupMenuButton<String>(
+                          onSelected: (val) {
+                            if (val == 'pago') mudarStatusCobranca(c['id'], 'Pago');
+                            if (val == 'pendente') mudarStatusCobranca(c['id'], 'Pendente');
+                            if (val == 'editar') editarValor(c);
+                            if (val == 'excluir') excluirCobranca(c['id']);
+                            if (val == 'whatsapp') mandarCobrancaWhatsApp(c);
+                          },
+                          itemBuilder: (context) => [
+                            const PopupMenuItem(value: 'whatsapp', child: Text('📱 Mandar Cobrança', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold))),
+                            const PopupMenuItem(value: 'pago', child: Text('Marcar como Pago')),
+                            const PopupMenuItem(value: 'pendente', child: Text('Marcar como Pendente')),
+                            const PopupMenuItem(value: 'editar', child: Text('Editar Valor')),
+                            const PopupMenuItem(value: 'excluir', child: Text('Excluir Cobrança', style: TextStyle(color: Colors.red))),
                           ],
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text('R\$ ${double.parse(c['valor'].toString()).toStringAsFixed(2)}', style: TextStyle(fontWeight: FontWeight.bold, color: pago ? Colors.green : Colors.orange)),
+                              Text(c['status'], style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                            ],
+                          ),
                         ),
-                        subtitle: Text('Série: ${al['ano_escolar'] ?? '-'}\nWhatsApp: ${al['whatsapp_aluno'] ?? al['whatsapp_resp'] ?? '-'}'),
                         isThreeLine: true,
-                        trailing: Chip(
-                          backgroundColor: Colors.indigo.shade50,
-                          label: Text('$concluidas dadas', style: const TextStyle(color: Colors.indigo, fontWeight: FontWeight.bold)),
-                        ),
-                        onTap: () => abrirPerfilAluno(al),
                       ),
                     );
                   },
                 ),
-      floatingActionButton: FloatingActionButton(onPressed: carregarDados, tooltip: 'Atualizar', child: const Icon(Icons.refresh)),
+      floatingActionButton: FloatingActionButton(onPressed: carregarCobrancas, tooltip: 'Atualizar', child: const Icon(Icons.refresh)),
     );
   }
 }
 
-// ================= TELA 4: PAINEL DE GANHOS =================
-class TelaPainelGanhosMobile extends StatefulWidget {
-  const TelaPainelGanhosMobile({super.key});
+class AbaResumoGanhosMobile extends StatefulWidget {
+  const AbaResumoGanhosMobile({super.key});
 
   @override
-  State<TelaPainelGanhosMobile> createState() => _TelaPainelGanhosMobileState();
+  State<AbaResumoGanhosMobile> createState() => _AbaResumoGanhosMobileState();
 }
 
-class _TelaPainelGanhosMobileState extends State<TelaPainelGanhosMobile> {
+class _AbaResumoGanhosMobileState extends State<AbaResumoGanhosMobile> {
   final supabase = Supabase.instance.client;
+  double hoje = 0.0;
+  double semana = 0.0;
+  double mes = 0.0;
+  double ano = 0.0;
   bool carregando = true;
-  double ganhoDiario = 0;
-  double ganhoMensal = 0;
-  double ganhoSemestral = 0;
-  double ganhoAnual = 0;
-  double ganhoTotal = 0;
-
-  List<Map<String, dynamic>> historicoDiario = [];
-  List<Map<String, dynamic>> historicoMensal = [];
-  List<Map<String, dynamic>> historicoAnual = [];
 
   @override
   void initState() {
     super.initState();
-    calcularGanhos();
+    calcularResumo();
   }
 
-  Future<void> calcularGanhos() async {
+  Future<void> calcularResumo() async {
     try {
-      final resAulas = await supabase.from('aulas').select().eq('status_aula', 'Realizada');
-      double valorAulaPadrao = 110.0;
+      final res = await supabase.from('cobrancas').select().eq('status', 'Pago');
+      final dtHoje = DateTime.now();
+      final dtInicioSemana = dtHoje.subtract(Duration(days: dtHoje.weekday - 1));
+      final dtFimSemana = dtInicioSemana.add(const Duration(days: 6));
 
-      DateTime hoje = DateTime.now();
-      String hojeStr = hoje.toString().substring(0, 10);
-      String mesAtualStr = hoje.toString().substring(0, 7);
-      String anoAtualStr = hoje.toString().substring(0, 4);
+      double tHoje = 0.0, tSem = 0.0, tMes = 0.0, tAno = 0.0;
 
-      double d = 0, m = 0, sem = 0, ano = 0, tot = 0;
-      Map<String, double> mapDias = {};
-      Map<String, double> mapMeses = {};
-      Map<String, double> mapAnos = {};
+      for (var r in res) {
+        String? venc = r['vencimento'];
+        double val = double.tryParse(r['valor'].toString()) ?? 0.0;
+        if (venc == null || venc.length < 10) continue;
 
-      for (var aula in resAulas) {
-        String data = aula['data_aula']?.toString() ?? '';
-        if (data.length < 10) continue;
-        double valor = valorAulaPadrao;
-
-        tot += valor;
-
-        if (data == hojeStr) d += valor;
-        if (DateTime.parse(data).isAfter(hoje.subtract(const Duration(days: 30)))) {
-          mapDias[data] = (mapDias[data] ?? 0) + valor;
-        }
-
-        if (data.startsWith(mesAtualStr)) m += valor;
-        String mesKey = data.substring(0, 7);
-        mapMeses[mesKey] = (mapMeses[mesKey] ?? 0) + valor;
-
-        if (data.startsWith(anoAtualStr)) ano += valor;
-        String anoKey = data.substring(0, 4);
-        mapAnos[anoKey] = (mapAnos[anoKey] ?? 0) + valor;
-
-        if (DateTime.parse(data).isAfter(hoje.subtract(const Duration(days: 180)))) {
-          sem += valor;
-        }
+        try {
+          DateTime dtObj = DateTime.parse(venc.split('/').reversed.join('-'));
+          if (dtObj.year == dtHoje.year && dtObj.month == dtHoje.month && dtObj.day == dtHoje.day) {
+            tHoje += val;
+          }
+          if (dtObj.isAfter(dtInicioSemana.subtract(const Duration(days: 1))) && dtObj.isBefore(dtFimSemana.add(const Duration(days: 1)))) {
+            tSem += val;
+          }
+          if (dtObj.year == dtHoje.year && dtObj.month == dtHoje.month) {
+            tMes += val;
+          }
+          if (dtObj.year == dtHoje.year) {
+            tAno += val;
+          }
+        } catch (_) {}
       }
-
-      historicoDiario = mapDias.entries.map((e) => {'periodo': e.key, 'valor': e.value}).toList();
-      historicoDiario.sort((a, b) => b['periodo'].compareTo(a['periodo']));
-
-      historicoMensal = mapMeses.entries.map((e) => {'periodo': e.key, 'valor': e.value}).toList();
-      historicoMensal.sort((a, b) => b['periodo'].compareTo(a['periodo']));
-
-      historicoAnual = mapAnos.entries.map((e) => {'periodo': e.key, 'valor': e.value}).toList();
-      historicoAnual.sort((a, b) => b['periodo'].compareTo(a['periodo']));
 
       if (!mounted) return;
       setState(() {
-        ganhoDiario = d;
-        ganhoMensal = m;
-        ganhoSemestral = sem;
-        ganhoAnual = ano;
-        ganhoTotal = tot;
+        hoje = tHoje;
+        semana = tSem;
+        mes = tMes;
+        ano = tAno;
+        carregando = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => carregando = false);
+    }
+  }
+
+  Widget cardGanho(String titulo, double valor, Color cor) {
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      elevation: 3,
+      child: Padding(
+        padding: const EdgeInsets.all(20.0),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(titulo, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.grey)),
+            Text('R\$ ${valor.toStringAsFixed(2)}', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: cor)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: carregando
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              children: [
+                cardGanho('Ganho Hoje', hoje, Colors.blue),
+                cardGanho('Ganho Esta Semana', semana, Colors.teal),
+                cardGanho('Ganho Este Mês', mes, Colors.green),
+                cardGanho('Ganho Este Ano', ano, Colors.purple),
+              ],
+            ),
+      floatingActionButton: FloatingActionButton(onPressed: calcularResumo, tooltip: 'Atualizar', child: const Icon(Icons.refresh)),
+    );
+  }
+}
+
+class AbaEvolucaoGanhosMobile extends StatefulWidget {
+  const AbaEvolucaoGanhosMobile({super.key});
+
+  @override
+  State<AbaEvolucaoGanhosMobile> createState() => _AbaEvolucaoGanhosMobileState();
+}
+
+class _AbaEvolucaoGanhosMobileState extends State<AbaEvolucaoGanhosMobile> {
+  final supabase = Supabase.instance.client;
+  List<Map<String, dynamic>> evolucao = [];
+  bool carregando = true;
+  String escalaSel = "Mensal";
+
+  @override
+  void initState() {
+    super.initState();
+    calcularEvolucao();
+  }
+
+  Future<void> calcularEvolucao() async {
+    try {
+      final res = await supabase.from('cobrancas').select().eq('status', 'Pago');
+      Map<String, double> agrupado = {};
+
+      for (var r in res) {
+        String? venc = r['vencimento'];
+        double val = double.tryParse(r['valor'].toString()) ?? 0.0;
+        if (venc == null || venc.length < 10) continue;
+
+        try {
+          DateTime dtObj = DateTime.parse(venc.split('/').reversed.join('-'));
+          String chave = "${dtObj.year}-${dtObj.month.toString().padLeft(2, '0')}";
+          if (escalaSel == "Anual") {
+            chave = "${dtObj.year}";
+          } else if (escalaSel == "Diária") {
+            chave = venc;
+          } else if (escalaSel == "Semanal") {
+            int semanaAno = (dtObj.day - 1) ~/ 7 + 1;
+            chave = "${dtObj.year}-S$semanaAno (${dtObj.month.toString().padLeft(2, '0')})";
+          }
+          agrupado[chave] = (agrupado[chave] ?? 0.0) + val;
+        } catch (_) {}
+      }
+
+      List<Map<String, dynamic>> lista = agrupado.entries.map((e) => {'periodo': e.key, 'total': e.value}).toList();
+      lista.sort((a, b) => b['periodo'].compareTo(a['periodo']));
+
+      if (!mounted) return;
+      setState(() {
+        evolucao = lista.take(30).toList();
         carregando = false;
       });
     } catch (_) {
@@ -988,89 +1431,52 @@ class _TelaPainelGanhosMobileState extends State<TelaPainelGanhosMobile> {
 
   @override
   Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 4,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Painel de Ganhos'),
-          bottom: const TabBar(
-            isScrollable: true,
-            tabs: [
-              Tab(text: 'Resumo'),
-              Tab(text: 'Hist. Diário'),
-              Tab(text: 'Hist. Mensal'),
-              Tab(text: 'Hist. Anual'),
-            ],
+    return Scaffold(
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(60),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+          color: Colors.white,
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: ["Diária", "Semanal", "Mensal", "Bimestral", "Trimestral", "Semestral", "Anual"].map((escala) {
+                bool selecionado = escalaSel == escala;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: ChoiceChip(
+                    label: Text(escala),
+                    selected: selecionado,
+                    onSelected: (bool selected) {
+                      if (selected) {
+                        setState(() => escalaSel = escala);
+                        calcularEvolucao();
+                      }
+                    },
+                  ),
+                );
+              }).toList(),
+            ),
           ),
         ),
-        body: carregando
-            ? const Center(child: CircularProgressIndicator())
-            : TabBarView(
-                children: [
-                  SingleChildScrollView(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        _cardGanho('Ganho Hoje (Diário)', ganhoDiario, Colors.blue),
-                        _cardGanho('Ganho Este Mês', ganhoMensal, Colors.green),
-                        _cardGanho('Ganho Último Semestre', ganhoSemestral, Colors.orange),
-                        _cardGanho('Ganho Este Ano', ganhoAnual, Colors.purple),
-                        _cardGanho('Ganho Desde o Início', ganhoTotal, Colors.indigo),
-                      ],
-                    ),
-                  ),
-                  ListView.builder(
-                    itemCount: historicoDiario.length,
-                    itemBuilder: (context, i) {
-                      final item = historicoDiario[i];
-                      return ListTile(
-                        title: Text('Dia: ${item['periodo']}'),
-                        trailing: Text('R\$ ${item['valor'].toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
-                      );
-                    },
-                  ),
-                  ListView.builder(
-                    itemCount: historicoMensal.length,
-                    itemBuilder: (context, i) {
-                      final item = historicoMensal[i];
-                      return ListTile(
-                        title: Text('Mês: ${item['periodo']}'),
-                        trailing: Text('R\$ ${item['valor'].toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
-                      );
-                    },
-                  ),
-                  ListView.builder(
-                    itemCount: historicoAnual.length,
-                    itemBuilder: (context, i) {
-                      final item = historicoAnual[i];
-                      return ListTile(
-                        title: Text('Ano: ${item['periodo']}'),
-                        trailing: Text('R\$ ${item['valor'].toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
-                      );
-                    },
-                  ),
-                ],
-              ),
-        floatingActionButton: FloatingActionButton(onPressed: calcularGanhos, tooltip: 'Atualizar Ganhos', child: const Icon(Icons.refresh)),
       ),
-    );
-  }
-
-  Widget _cardGanho(String titulo, double valor, Color cor) {
-    return Card(
-      elevation: 3,
-      margin: const EdgeInsets.symmetric(vertical: 8),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            Text(titulo, style: const TextStyle(fontSize: 14, color: Colors.grey, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            Text('R\$ ${valor.toStringAsFixed(2)}', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: cor)),
-          ],
-        ),
-      ),
+      body: carregando
+          ? const Center(child: CircularProgressIndicator())
+          : evolucao.isEmpty
+              ? const Center(child: Text('Nenhum ganho registrado no período.'))
+              : ListView.builder(
+                  itemCount: evolucao.length,
+                  itemBuilder: (context, index) {
+                    final item = evolucao[index];
+                    return Card(
+                      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      child: ListTile(
+                        title: Text('Período: ${item['periodo']}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        trailing: Text('R\$ ${item['total'].toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 16)),
+                      ),
+                    );
+                  },
+                ),
     );
   }
 }
@@ -1086,10 +1492,9 @@ class TelaConfiguracoesMobile extends StatefulWidget {
 class _TelaConfiguracoesMobileState extends State<TelaConfiguracoesMobile> {
   final supabase = Supabase.instance.client;
   
-  final _nomeController = TextEditingController(text: 'Alexander Garreta Gonçalves Costa Pinto');
+  final _nomeController = TextEditingController(text: '');
   final _chavePixController = TextEditingController();
   final _preco1hController = TextEditingController(text: '110.00');
-  final _preco1h30Controller = TextEditingController(text: '155.00');
   bool carregando = true;
   bool salvando = false;
 
@@ -1156,15 +1561,7 @@ class _TelaConfiguracoesMobileState extends State<TelaConfiguracoesMobile> {
                   const SizedBox(height: 14),
                   TextField(controller: _chavePixController, decoration: const InputDecoration(labelText: 'Chave Pix Principal', border: OutlineInputBorder(), prefixIcon: Icon(Icons.pix))),
                   const SizedBox(height: 14),
-                  const Text('Preços Base:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(child: TextField(controller: _preco1hController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Base 1h (R\$)', border: OutlineInputBorder()))),
-                      const SizedBox(width: 8),
-                      Expanded(child: TextField(controller: _preco1h30Controller, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Base 1h30 (R\$)', border: OutlineInputBorder()))),
-                    ],
-                  ),
+                  TextField(controller: _preco1hController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Base Hora Avulsa (R\$)', border: OutlineInputBorder())),
                   const SizedBox(height: 24),
                   ElevatedButton.icon(
                     onPressed: salvando ? null : salvarConfiguracoes,
@@ -1178,3 +1575,5 @@ class _TelaConfiguracoesMobileState extends State<TelaConfiguracoesMobile> {
     );
   }
 }
+
+const List<String> DISCIPLINAS = ["Matemática", "Química", "Física"];
