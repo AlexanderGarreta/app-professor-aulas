@@ -64,7 +64,6 @@ class HomeMobilePage extends StatefulWidget {
 class _HomeMobilePageState extends State<HomeMobilePage> {
   int _indiceAtual = 0;
 
-  // Removida a tela de Ajustes, restando 4 abas principais
   final List<Widget> _telas = [
     const TelaAgendaMobile(),
     const TelaPrecosMobile(),
@@ -216,7 +215,7 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
 
         await supabase.from('aulas').delete().eq('id', id);
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Falta registrada e convertida em cobrança financeira.')));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Falta registada e convertida em cobrança financeira.')));
       } else if (novoStatus == 'Cancelada com Reposição') {
         await supabase.from('creditos_reposicao').insert({
           'aluno': aluno,
@@ -491,6 +490,11 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
         title: const Text('Agenda (Aulas Futuras)'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Atualizar',
+            onPressed: carregarAulas,
+          ),
+          IconButton(
             icon: const Icon(Icons.login),
             tooltip: 'Conectar Google Conta',
             onPressed: () async {
@@ -535,7 +539,6 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
                             Row(
                               mainAxisAlignment: MainAxisAlignment.end,
                               children: [
-                                // WhatsApp removido daqui conforme solicitado
                                 TextButton.icon(
                                   onPressed: () => mudarStatusComRegra(a['id'], 'Realizada'),
                                   icon: const Icon(Icons.check, color: Colors.indigo, size: 18),
@@ -627,6 +630,17 @@ class _AbaListaPrecosMobileState extends State<AbaListaPrecosMobile> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: AppBar(
+        title: const Text('Modalidades Ativas'),
+        automaticallyImplyLeading: false,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Atualizar',
+            onPressed: carregarPacotes,
+          ),
+        ],
+      ),
       body: carregando
           ? const Center(child: CircularProgressIndicator())
           : ListView.builder(
@@ -643,7 +657,6 @@ class _AbaListaPrecosMobileState extends State<AbaListaPrecosMobile> {
                 );
               },
             ),
-      floatingActionButton: FloatingActionButton(onPressed: carregarPacotes, tooltip: 'Atualizar', child: const Icon(Icons.refresh)),
     );
   }
 }
@@ -907,7 +920,6 @@ class _AbaListaAlunosMobileState extends State<AbaListaAlunosMobile> {
     }
   }
 
-  // Prontuário atualizado para listar pacotes em aberto e aulas restantes
   void abrirProntuario(Map<String, dynamic> aluno) async {
     String nome = aluno['nome'];
     List<Map<String, dynamic>> aulas = [];
@@ -1059,6 +1071,13 @@ class _AbaListaAlunosMobileState extends State<AbaListaAlunosMobile> {
       appBar: AppBar(
         title: Text('Alunos Cadastrados (Total: ${alunos.length})'),
         automaticallyImplyLeading: false,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Atualizar',
+            onPressed: carregarAlunos,
+          ),
+        ],
       ),
       body: carregando
           ? const Center(child: CircularProgressIndicator())
@@ -1083,7 +1102,6 @@ class _AbaListaAlunosMobileState extends State<AbaListaAlunosMobile> {
                     );
                   },
                 ),
-      floatingActionButton: FloatingActionButton(onPressed: carregarAlunos, tooltip: 'Atualizar', child: const Icon(Icons.refresh)),
     );
   }
 }
