@@ -64,12 +64,12 @@ class HomeMobilePage extends StatefulWidget {
 class _HomeMobilePageState extends State<HomeMobilePage> {
   int _indiceAtual = 0;
 
+  // Removida a tela de Ajustes, restando 4 abas principais
   final List<Widget> _telas = [
     const TelaAgendaMobile(),
     const TelaPrecosMobile(),
     const TelaAlunosMobile(),
     const TelaGestaoMasterMobile(),
-    const TelaConfiguracoesMobile(),
   ];
 
   @override
@@ -89,7 +89,6 @@ class _HomeMobilePageState extends State<HomeMobilePage> {
           BottomNavigationBarItem(icon: Icon(Icons.attach_money), label: 'Preços'),
           BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Alunos'),
           BottomNavigationBarItem(icon: Icon(Icons.assessment), label: 'Gestão'),
-          BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Ajustes'),
         ],
       ),
     );
@@ -241,23 +240,6 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erro: $e')));
     }
-  }
-
-  Future<void> abrirWhatsApp(String nomeAluno) async {
-    final res = await supabase.from('alunos').select('whatsapp_aluno, whatsapp_resp').eq('nome', nomeAluno).maybeSingle();
-    if (res != null) {
-      final wpp = res['whatsapp_resp'] ?? res['whatsapp_aluno'];
-      if (wpp != null && wpp.toString().isNotEmpty) {
-        final numLimpo = wpp.replaceAll(RegExp(r'\D'), '');
-        final url = Uri.parse('https://wa.me/55$numLimpo?text=Olá!%20Passando%20para%20falarmos%20sobre%20a%20aula.');
-        if (await canLaunchUrl(url)) {
-          await launchUrl(url, mode: LaunchMode.externalApplication);
-          return;
-        }
-      }
-    }
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('WhatsApp não cadastrado.')));
   }
 
   void abrirModalNovaAula() async {
@@ -553,7 +535,7 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
                             Row(
                               mainAxisAlignment: MainAxisAlignment.end,
                               children: [
-                                IconButton(icon: const Icon(Icons.chat, color: Colors.green), onPressed: () => abrirWhatsApp(a['aluno'])),
+                                // WhatsApp removido daqui conforme solicitado
                                 TextButton.icon(
                                   onPressed: () => mudarStatusComRegra(a['id'], 'Realizada'),
                                   icon: const Icon(Icons.check, color: Colors.indigo, size: 18),
@@ -925,12 +907,24 @@ class _AbaListaAlunosMobileState extends State<AbaListaAlunosMobile> {
     }
   }
 
+  // Prontuário atualizado para listar pacotes em aberto e aulas restantes
   void abrirProntuario(Map<String, dynamic> aluno) async {
     String nome = aluno['nome'];
     List<Map<String, dynamic>> aulas = [];
+    List<Map<String, dynamic>> pacotesComprados = [];
+    Map<String, Map<String, dynamic>> dadosPacotesMaster = {};
+
     try {
       final resAulas = await supabase.from('aulas').select().eq('aluno', nome);
       aulas = List<Map<String, dynamic>>.from(resAulas);
+
+      final resPacComp = await supabase.from('pacotes_comprados').select().eq('aluno', nome);
+      pacotesComprados = List<Map<String, dynamic>>.from(resPacComp);
+
+      final resPacs = await supabase.from('pacotes_professor').select();
+      for (var p in resPacs) {
+        dadosPacotesMaster[p['nome_pacote']] = p;
+      }
     } catch (_) {}
 
     int total = aulas.length;
@@ -941,18 +935,51 @@ class _AbaListaAlunosMobileState extends State<AbaListaAlunosMobile> {
       context: context,
       builder: (context) => AlertDialog(
         title: Text('Prontuário: $nome'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('• Ano Escolar: ${aluno['ano_escolar'] ?? '-'}'),
-            Text('• Responsável: ${aluno['responsavel'] ?? '-'}'),
-            Text('• Wpp Aluno: ${aluno['whatsapp_aluno'] ?? '-'}'),
-            Text('• Wpp Resp.: ${aluno['whatsapp_resp'] ?? '-'}'),
-            const Divider(),
-            Text('• Total de Aulas: $total'),
-            Text('• Aulas Realizadas: $feitas'),
-          ],
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('• Ano Escolar: ${aluno['ano_escolar'] ?? '-'}'),
+              Text('• Responsável: ${aluno['responsavel'] ?? '-'}'),
+              Text('• Wpp Aluno: ${aluno['whatsapp_aluno'] ?? '-'}'),
+              Text('• Wpp Resp.: ${aluno['whatsapp_resp'] ?? '-'}'),
+              const Divider(),
+              Text('• Total de Aulas: $total'),
+              Text('• Aulas Realizadas: $feitas'),
+              const Divider(),
+              const Text('📦 Pacotes e Ciclos:', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 6),
+              pacotesComprados.isEmpty
+                  ? const Text('Nenhum pacote contratado.')
+                  : Column(
+                      children: pacotesComprados.map((pc) {
+                        String pacNome = pc['pacote'] ?? '';
+                        var info = dadosPacotesMaster[pacNome] ?? {'qtd_aulas': 1};
+                        int qtdEsperada = int.tryParse(info['qtd_aulas'].toString()) ?? 1;
+                        int feitasPac = aulas.where((a) => a['pacote'] == pacNome).length;
+                        int restantes = (qtdEsperada - feitasPac).clamp(0, qtdEsperada);
+
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 6),
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.grey[100],
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('$pacNome', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
+                              Text('Início: ${pc['data_inicio']} | Fim: ${pc['data_fim']}'),
+                              Text('Aulas Restantes: $restantes de $qtdEsperada', style: TextStyle(color: restantes > 0 ? Colors.orange[800] : Colors.green)),
+                            ],
+                          ),
+                        );
+                      }).toList(),
+                    ),
+            ],
+          ),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Fechar')),
@@ -1918,101 +1945,6 @@ class _AbaEvolucaoGanhosMobileState extends State<AbaEvolucaoGanhosMobile> {
                     );
                   },
                 ),
-    );
-  }
-}
-
-// ================= TELA 5: AJUSTES & PERFIL =================
-class TelaConfiguracoesMobile extends StatefulWidget {
-  const TelaConfiguracoesMobile({super.key});
-
-  @override
-  State<TelaConfiguracoesMobile> createState() => _TelaConfiguracoesMobileState();
-}
-
-class _TelaConfiguracoesMobileState extends State<TelaConfiguracoesMobile> {
-  final supabase = Supabase.instance.client;
-  
-  final _nomeController = TextEditingController(text: '');
-  final _chavePixController = TextEditingController();
-  final _preco1hController = TextEditingController(text: '110.00');
-  bool carregando = true;
-  bool salvando = false;
-
-  @override
-  void initState() {
-    super.initState();
-    carregarConfig();
-  }
-
-  Future<void> carregarConfig() async {
-    try {
-      final res = await supabase.from('configuracoes_professor').select().limit(1).maybeSingle();
-      if (res != null) {
-        if (res['nome_professor'] != null) _nomeController.text = res['nome_professor'].toString();
-        if (res['chave_pix'] != null) _chavePixController.text = res['chave_pix'].toString();
-        if (res['preco_hora_avulsa'] != null) {
-          _preco1hController.text = double.parse(res['preco_hora_avulsa'].toString()).toStringAsFixed(2);
-        }
-      }
-      if (mounted) setState(() => carregando = false);
-    } catch (_) {
-      if (mounted) setState(() => carregando = false);
-    }
-  }
-
-  Future<void> salvarConfiguracoes() async {
-    setState(() => salvando = true);
-    try {
-      final resExistente = await supabase.from('configuracoes_professor').select('id').limit(1).maybeSingle();
-      final dados = {
-        'nome_professor': _nomeController.text.trim(),
-        'chave_pix': _chavePixController.text.trim(),
-        'preco_hora_avulsa': double.tryParse(_preco1hController.text.replaceAll(',', '.')) ?? 110.0,
-      };
-
-      if (resExistente != null) {
-        await supabase.from('configuracoes_professor').update(dados).eq('id', resExistente['id']);
-      } else {
-        await supabase.from('configuracoes_professor').insert(dados);
-      }
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Ajustes salvos com sucesso!')));
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erro: $e')));
-    } finally {
-      if (mounted) setState(() => salvando = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Ajustes & Perfil')),
-      body: carregando
-          ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  TextField(controller: _nomeController, decoration: const InputDecoration(labelText: 'Nome do Professor', border: OutlineInputBorder())),
-                  const SizedBox(height: 14),
-                  TextField(controller: _chavePixController, decoration: const InputDecoration(labelText: 'Chave Pix Principal', border: OutlineInputBorder(), prefixIcon: Icon(Icons.pix))),
-                  const SizedBox(height: 14),
-                  TextField(controller: _preco1hController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Base Hora Avulsa (R\$)', border: OutlineInputBorder())),
-                  const SizedBox(height: 24),
-                  ElevatedButton.icon(
-                    onPressed: salvando ? null : salvarConfiguracoes,
-                    icon: salvando ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Icon(Icons.save),
-                    label: Text(salvando ? 'Salvando...' : 'Salvar Ajustes'),
-                    style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
-                  ),
-                ],
-              ),
-            ),
     );
   }
 }
