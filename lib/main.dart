@@ -487,7 +487,7 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Agenda (Aulas Futuras)'),
+        title: const Text('Agenda'),
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
