@@ -1678,6 +1678,93 @@ class _AbaListaAlunosMobileState extends State<AbaListaAlunosMobile> {
             ),
           ),
           actions: [
+            TextButton.icon(
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              onPressed: () async {
+                final nome = aluno['nome']?.toString() ?? 'este aluno';
+                var quantidadeAulas = 0;
+                var quantidadePacotes = 0;
+
+                try {
+                  final resultados = await Future.wait([
+                    supabase.from('aulas').select().eq('aluno', nomeOriginal),
+                    supabase
+                        .from('pacotes_comprados')
+                        .select()
+                        .eq('aluno', nomeOriginal),
+                  ]);
+                  quantidadeAulas = (resultados[0] as List).length;
+                  quantidadePacotes = (resultados[1] as List).length;
+                } catch (_) {
+                  // A confirmação continua disponível mesmo se a contagem falhar.
+                }
+
+                if (!context.mounted) return;
+                final confirmar = await showDialog<bool>(
+                  context: context,
+                  builder: (confirmContext) => AlertDialog(
+                    title: Text('Excluir $nome?'),
+                    content: Text(
+                      'O aluno será removido da lista de alunos.\n\n'
+                      'Histórico preservado:\n'
+                      '• $quantidadeAulas aula(s) cadastrada(s)\n'
+                      '• $quantidadePacotes pacote(s) comprado(s)\n\n'
+                      'As aulas e os pacotes não serão apagados. '
+                      'Essa ação não pode ser desfeita.',
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(confirmContext, false),
+                        child: const Text('Cancelar'),
+                      ),
+                      ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.red,
+                          foregroundColor: Colors.white,
+                        ),
+                        onPressed: () => Navigator.pop(confirmContext, true),
+                        icon: const Icon(Icons.delete),
+                        label: const Text('Excluir aluno'),
+                      ),
+                    ],
+                  ),
+                );
+
+                if (confirmar != true || !context.mounted) return;
+
+                try {
+                  final id = aluno['id'];
+                  if (id != null) {
+                    await supabase.from('alunos').delete().eq('id', id);
+                  } else if (nomeOriginal.isNotEmpty) {
+                    await supabase
+                        .from('alunos')
+                        .delete()
+                        .eq('nome', nomeOriginal);
+                  } else {
+                    throw Exception('Registro do aluno sem identificador.');
+                  }
+
+                  if (context.mounted) Navigator.pop(context);
+                  await carregarAlunos();
+                  if (mounted) {
+                    ScaffoldMessenger.of(this.context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Aluno excluído com sucesso!'),
+                      ),
+                    );
+                  }
+                } catch (e) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(this.context).showSnackBar(
+                      SnackBar(content: Text('Erro ao excluir aluno: $e')),
+                    );
+                  }
+                }
+              },
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('Excluir'),
+            ),
             TextButton(
               onPressed: () => Navigator.pop(context),
               child: const Text('Cancelar'),
