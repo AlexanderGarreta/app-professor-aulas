@@ -1,4 +1,0 @@
-storePassword=Alex1234
-keyPassword=Alex1234
-keyAlias=upload
-storeFile=upload-keystore.jks
