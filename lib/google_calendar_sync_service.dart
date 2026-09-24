@@ -86,7 +86,12 @@ class GoogleCalendarSyncService {
     return DateTime(year!, month!, day!, hour!, minute!);
   }
 
-  Future<int> lessonDuration(String? packageName) async {
+  Future<int> lessonDuration(
+    String? packageName, {
+    dynamic storedDuration,
+  }) async {
+    final savedMinutes = int.tryParse(storedDuration?.toString() ?? '');
+    if (savedMinutes != null && savedMinutes > 0) return savedMinutes;
     if (packageName == null || packageName.isEmpty) return 60;
     try {
       final package = await _supabase
@@ -137,7 +142,10 @@ class GoogleCalendarSyncService {
     if (start == null) {
       throw Exception('Data ou horário da aula inválidos.');
     }
-    final duration = await lessonDuration(lesson['pacote']?.toString());
+    final duration = await lessonDuration(
+      lesson['pacote']?.toString(),
+      storedDuration: lesson['duracao_min'],
+    );
     final end = start.add(Duration(minutes: duration));
     return {
       'summary': _eventTitle(lesson),
@@ -214,7 +222,10 @@ class GoogleCalendarSyncService {
     // Compatibilidade com eventos criados antes de o ProfEconomy guardar o ID.
     final start = parseLessonDate(lesson);
     if (start == null) return null;
-    final duration = await lessonDuration(lesson['pacote']?.toString());
+    final duration = await lessonDuration(
+      lesson['pacote']?.toString(),
+      storedDuration: lesson['duracao_min'],
+    );
     final end = start.add(Duration(minutes: duration));
     final candidates = await _listEvents(headers, {
       'timeMin': start

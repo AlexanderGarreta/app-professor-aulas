@@ -4,6 +4,9 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'google_calendar_sync_service.dart';
+import 'new_lesson_dialog.dart';
+import 'open_packages_tab.dart';
+import 'scheduling_service.dart';
 
 const List<String> DISCIPLINAS = [
   'Matemática',
@@ -129,6 +132,7 @@ class TelaAgendaMobile extends StatefulWidget {
 class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
   final supabase = Supabase.instance.client;
   final calendarSync = GoogleCalendarSyncService.instance;
+  final scheduling = SchedulingService.instance;
   List<Map<String, dynamic>> aulas = [];
   bool carregando = true;
   bool sincronizando = false;
@@ -151,6 +155,7 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
   Future<void> carregarAulas() async {
     if (mounted) setState(() => carregando = true);
     try {
+      await scheduling.completePastLessons();
       final response = await supabase
           .from('aulas')
           .select()
@@ -241,12 +246,61 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
   }
 
   Future<void> excluirAula(Map<String, dynamic> aula) async {
+    var aulasParaExcluir = <Map<String, dynamic>>[aula];
+    final serieId = aula['serie_id']?.toString();
+    if (serieId != null && serieId.isNotEmpty) {
+      final escopo = await showDialog<String>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Excluir aulas fixas'),
+          content: const Text(
+            'Esta aula faz parte de uma sequência. O que deseja excluir?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancelar'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, 'uma'),
+              child: const Text('Somente esta'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, 'futuras'),
+              child: const Text('Esta e as próximas'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(dialogContext, 'todas'),
+              child: const Text('Toda a sequência'),
+            ),
+          ],
+        ),
+      );
+      if (escopo == null) return;
+
+      final response = await supabase
+          .from('aulas')
+          .select()
+          .eq('serie_id', serieId);
+      final serie = List<Map<String, dynamic>>.from(response);
+      final inicioSelecionado = scheduling.parseLessonStart(aula);
+      aulasParaExcluir = serie.where((item) {
+        if (escopo == 'todas') return true;
+        if (escopo == 'uma') return item['id'] == aula['id'];
+        final inicio = scheduling.parseLessonStart(item);
+        return inicioSelecionado != null &&
+            inicio != null &&
+            !inicio.isBefore(inicioSelecionado);
+      }).toList();
+    }
+
     final escolha = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Excluir aula'),
-        content: const Text(
-          'Deseja excluir esta aula também do Google Agenda?',
+        content: Text(
+          'Você excluirá ${aulasParaExcluir.length} aula(s). '
+          'Deseja excluir também do Google Agenda?',
         ),
         actions: [
           TextButton(
@@ -268,9 +322,17 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
 
     try {
       if (escolha == 'somente_app') {
-        await supabase.from('aulas').delete().eq('id', aula['id']);
+        await supabase
+            .from('aulas')
+            .delete()
+            .inFilter(
+              'id',
+              aulasParaExcluir.map((item) => item['id']).toList(),
+            );
       } else {
-        await calendarSync.requestLessonDeletion(aula);
+        for (final item in aulasParaExcluir) {
+          await calendarSync.requestLessonDeletion(item);
+        }
       }
       await carregarAulas();
       if (!mounted) return;
@@ -748,6 +810,11 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
     );
   }
 
+  Future<void> abrirNovoAgendamento() async {
+    final quantidade = await showNewLessonDialog(context);
+    if (quantidade != null) await carregarAulas();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -923,7 +990,7 @@ class _TelaAgendaMobileState extends State<TelaAgendaMobile> {
               },
             ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: abrirModalNovaAula,
+        onPressed: abrirNovoAgendamento,
         icon: const Icon(Icons.add),
         label: const Text('Nova Aula'),
       ),
@@ -1966,13 +2033,22 @@ class _AbaComprarPacoteMobileState extends State<AbaComprarPacoteMobile> {
       String dataFimStr =
           "${dataFim.day.toString().padLeft(2, '0')}/${dataFim.month.toString().padLeft(2, '0')}/${dataFim.year}";
 
-      await supabase.from('pacotes_comprados').insert({
-        'aluno': alunoSelecionado,
-        'pacote': pacoteSelecionado,
-        'data_inicio': dataIniStr,
-        'data_fim': dataFimStr,
-        'valor_total': valorTotal,
-      });
+      final pacoteComprado = await supabase
+          .from('pacotes_comprados')
+          .insert({
+            'aluno': alunoSelecionado,
+            'pacote': pacoteSelecionado,
+            'data_inicio': dataIniStr,
+            'data_fim': dataFimStr,
+            'valor_total': valorTotal,
+            'qtd_aulas_total':
+                int.tryParse(pac['qtd_aulas']?.toString() ?? '') ?? 1,
+            'duracao_min':
+                int.tryParse(pac['duracao_min']?.toString() ?? '') ?? 60,
+            'status_pacote': 'Aberto',
+          })
+          .select()
+          .single();
 
       double valorMetade = valorTotal / 2.0;
       await supabase.from('cobrancas').insert([
@@ -1982,6 +2058,7 @@ class _AbaComprarPacoteMobileState extends State<AbaComprarPacoteMobile> {
           'valor': valorMetade,
           'vencimento': dataInicio.toString().substring(0, 10),
           'status': 'Pendente',
+          'pacote_compra_id': pacoteComprado['id'],
         },
         {
           'aluno': alunoSelecionado,
@@ -1989,6 +2066,7 @@ class _AbaComprarPacoteMobileState extends State<AbaComprarPacoteMobile> {
           'valor': valorMetade,
           'vencimento': dataFim.toString().substring(0, 10),
           'status': 'Pendente',
+          'pacote_compra_id': pacoteComprado['id'],
         },
       ]);
 
@@ -2122,13 +2200,14 @@ class TelaGestaoMasterMobile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 4,
+      length: 5,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Painel de Gestão'),
           bottom: const TabBar(
             isScrollable: true,
             tabs: [
+              Tab(text: 'Pacotes em Aberto'),
               Tab(text: 'Controle de Aulas'),
               Tab(text: 'Cobranças'),
               Tab(text: 'Resumo Fin.'),
@@ -2138,6 +2217,7 @@ class TelaGestaoMasterMobile extends StatelessWidget {
         ),
         body: const TabBarView(
           children: [
+            OpenPackagesTab(),
             AbaControleAulasMobile(),
             AbaCobrancasMobile(),
             AbaResumoGanhosMobile(),
@@ -2159,6 +2239,7 @@ class AbaControleAulasMobile extends StatefulWidget {
 class _AbaControleAulasMobileState extends State<AbaControleAulasMobile> {
   final supabase = Supabase.instance.client;
   final calendarSync = GoogleCalendarSyncService.instance;
+  final scheduling = SchedulingService.instance;
   List<Map<String, dynamic>> aulas = [];
   bool carregando = true;
   String filtroStatus = 'Agendada';
@@ -2171,11 +2252,20 @@ class _AbaControleAulasMobileState extends State<AbaControleAulasMobile> {
 
   Future<void> carregarAulas() async {
     try {
+      await scheduling.completePastLessons();
+      final statusConsulta = filtroStatus == 'Automáticas'
+          ? 'Realizada'
+          : filtroStatus;
       final res = await supabase
           .from('aulas')
           .select()
-          .eq('status_aula', filtroStatus);
+          .eq('status_aula', statusConsulta);
       List<Map<String, dynamic>> lista = List<Map<String, dynamic>>.from(res);
+      if (filtroStatus == 'Automáticas') {
+        lista = lista
+            .where((aula) => aula['confirmacao_automatica'] == true)
+            .toList();
+      }
 
       lista.sort((a, b) {
         try {
@@ -2266,31 +2356,134 @@ class _AbaControleAulasMobileState extends State<AbaControleAulasMobile> {
             ),
             ElevatedButton(
               onPressed: () async {
-                String dataStr =
-                    "${dataSel.day.toString().padLeft(2, '0')}/${dataSel.month.toString().padLeft(2, '0')}/${dataSel.year}";
-                String horaStr =
-                    "${horaSel.hour.toString().padLeft(2, '0')}:${horaSel.minute.toString().padLeft(2, '0')}";
-
-                final aulaAtualizada = await supabase
-                    .from('aulas')
-                    .update({
-                      'data_aula': dataStr,
-                      'horario': horaStr,
-                      'assunto': assuntoCtrl.text.trim(),
-                      'google_sync_status': 'pendente',
-                      'google_sync_action': 'upsert',
-                      'google_sync_error': null,
-                    })
-                    .eq('id', aula['id'])
-                    .select()
-                    .single();
-
-                String mensagem = 'Aula atualizada no app e no Google Agenda.';
-                try {
-                  await calendarSync.syncLesson(aulaAtualizada);
-                } catch (_) {
-                  mensagem = 'Aula atualizada no app. A sincronização com o Google ficou pendente.';
+                final duration = await scheduling.lessonDuration(aula);
+                final originalStart = scheduling.parseLessonStart(aula);
+                final selectedStart = DateTime(
+                  dataSel.year,
+                  dataSel.month,
+                  dataSel.day,
+                  horaSel.hour,
+                  horaSel.minute,
+                );
+                var targets = <Map<String, dynamic>>[aula];
+                final serieId = aula['serie_id']?.toString();
+                if (serieId != null && serieId.isNotEmpty) {
+                  final scope = await showDialog<String>(
+                    context: context,
+                    builder: (scopeContext) => AlertDialog(
+                      title: const Text('Editar aulas fixas'),
+                      content: const Text(
+                        'Esta aula faz parte de uma sequência. '
+                        'Onde deseja aplicar a alteração?',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(scopeContext),
+                          child: const Text('Cancelar'),
+                        ),
+                        TextButton(
+                          onPressed: () => Navigator.pop(scopeContext, 'uma'),
+                          child: const Text('Somente esta'),
+                        ),
+                        TextButton(
+                          onPressed: () =>
+                              Navigator.pop(scopeContext, 'futuras'),
+                          child: const Text('Esta e as próximas'),
+                        ),
+                        ElevatedButton(
+                          onPressed: () => Navigator.pop(scopeContext, 'todas'),
+                          child: const Text('Toda a sequência'),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (scope == null || !context.mounted) return;
+                  final response = await supabase
+                      .from('aulas')
+                      .select()
+                      .eq('serie_id', serieId);
+                  final series = List<Map<String, dynamic>>.from(response);
+                  targets = series.where((item) {
+                    if (scope == 'todas') return true;
+                    if (scope == 'uma') return item['id'] == aula['id'];
+                    final start = scheduling.parseLessonStart(item);
+                    return originalStart != null &&
+                        start != null &&
+                        !start.isBefore(originalStart);
+                  }).toList();
                 }
+
+                final delta = originalStart == null
+                    ? Duration.zero
+                    : selectedStart.difference(originalStart);
+                final newStarts = <dynamic, DateTime>{};
+                for (final target in targets) {
+                  final oldStart = scheduling.parseLessonStart(target);
+                  if (target['id'] == aula['id']) {
+                    newStarts[target['id']] = selectedStart;
+                  } else if (oldStart != null) {
+                    newStarts[target['id']] = oldStart.add(delta);
+                  }
+                }
+                final requested = targets
+                    .where((target) => newStarts[target['id']] != null)
+                    .map(
+                      (target) => LessonSlot(
+                        start: newStarts[target['id']]!,
+                        durationMinutes:
+                            int.tryParse(
+                              target['duracao_min']?.toString() ?? '',
+                            ) ??
+                            duration,
+                        label: target['aluno']?.toString(),
+                      ),
+                    )
+                    .toList();
+                final conflicts = await scheduling.findConflicts(
+                  requested,
+                  excludeLessonIds: targets.map((item) => item['id']).toSet(),
+                );
+                if (conflicts.isNotEmpty) {
+                  if (!context.mounted) return;
+                  final existing = conflicts.first.existing;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        'Horário ocupado por ${existing['aluno'] ?? 'outra aula'} '
+                        'às ${existing['horario'] ?? ''}. Escolha outro horário.',
+                      ),
+                    ),
+                  );
+                  return;
+                }
+
+                var syncErrors = 0;
+                for (final target in targets) {
+                  final newStart = newStarts[target['id']];
+                  if (newStart == null) continue;
+                  final aulaAtualizada = await supabase
+                      .from('aulas')
+                      .update({
+                        'data_aula': scheduling.formatDate(newStart),
+                        'horario': scheduling.formatTime(newStart),
+                        'assunto': assuntoCtrl.text.trim(),
+                        'google_sync_status': 'pendente',
+                        'google_sync_action': 'upsert',
+                        'google_sync_error': null,
+                      })
+                      .eq('id', target['id'])
+                      .select()
+                      .single();
+                  try {
+                    await calendarSync.syncLesson(aulaAtualizada);
+                  } catch (_) {
+                    syncErrors++;
+                  }
+                }
+
+                final mensagem = syncErrors == 0
+                    ? '${targets.length} aula(s) atualizada(s) no app e no Google Agenda.'
+                    : '${targets.length} aula(s) atualizada(s); $syncErrors sincronização(ões) ficaram pendentes.';
 
                 if (context.mounted) Navigator.pop(context);
                 carregarAulas();
@@ -2307,6 +2500,69 @@ class _AbaControleAulasMobileState extends State<AbaControleAulasMobile> {
     );
   }
 
+  Future<void> resolverAulaEmRevisao(Map<String, dynamic> aula) async {
+    final escolha = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Revisar aula de ${aula['aluno']}'),
+        content: Text(
+          '${aula['data_aula']} às ${aula['horario']}\n\n'
+          'Escolha o que realmente aconteceu com esta aula.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, 'cancelar'),
+            child: const Text('Cancelada sem cobrança'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, 'falta'),
+            child: const Text('Falta sem aviso'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(dialogContext, 'realizada'),
+            child: const Text('Realizada'),
+          ),
+        ],
+      ),
+    );
+    if (escolha == null) return;
+
+    try {
+      if (escolha == 'cancelar') {
+        await calendarSync.requestLessonDeletion(aula);
+      } else if (escolha == 'falta') {
+        await supabase
+            .from('aulas')
+            .update({
+              'status_aula': 'Falta sem Aviso',
+              'confirmacao_automatica': false,
+              'google_sync_status': 'pendente',
+              'google_sync_action': 'upsert',
+            })
+            .eq('id', aula['id']);
+      } else {
+        await supabase
+            .from('aulas')
+            .update({
+              'status_aula': 'Realizada',
+              'confirmacao_automatica': false,
+              'realizada_em': DateTime.now().toIso8601String(),
+            })
+            .eq('id', aula['id']);
+      }
+      await carregarAulas();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Erro ao revisar aula: $error')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -2315,31 +2571,56 @@ class _AbaControleAulasMobileState extends State<AbaControleAulasMobile> {
         child: Container(
           color: Colors.white,
           alignment: Alignment.center,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              ChoiceChip(
-                label: const Text('Agendadas'),
-                selected: filtroStatus == 'Agendada',
-                onSelected: (sel) {
-                  if (sel) {
-                    setState(() => filtroStatus = 'Agendada');
-                    carregarAulas();
-                  }
-                },
-              ),
-              const SizedBox(width: 10),
-              ChoiceChip(
-                label: const Text('Realizadas'),
-                selected: filtroStatus == 'Realizada',
-                onSelected: (sel) {
-                  if (sel) {
-                    setState(() => filtroStatus = 'Realizada');
-                    carregarAulas();
-                  }
-                },
-              ),
-            ],
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(
+              children: [
+                ChoiceChip(
+                  label: const Text('Agendadas'),
+                  selected: filtroStatus == 'Agendada',
+                  onSelected: (sel) {
+                    if (sel) {
+                      setState(() => filtroStatus = 'Agendada');
+                      carregarAulas();
+                    }
+                  },
+                ),
+                const SizedBox(width: 10),
+                ChoiceChip(
+                  label: const Text('Realizadas'),
+                  selected: filtroStatus == 'Realizada',
+                  onSelected: (sel) {
+                    if (sel) {
+                      setState(() => filtroStatus = 'Realizada');
+                      carregarAulas();
+                    }
+                  },
+                ),
+                const SizedBox(width: 10),
+                ChoiceChip(
+                  label: const Text('Automáticas'),
+                  selected: filtroStatus == 'Automáticas',
+                  onSelected: (sel) {
+                    if (sel) {
+                      setState(() => filtroStatus = 'Automáticas');
+                      carregarAulas();
+                    }
+                  },
+                ),
+                const SizedBox(width: 10),
+                ChoiceChip(
+                  label: const Text('Revisar'),
+                  selected: filtroStatus == 'Revisar',
+                  onSelected: (sel) {
+                    if (sel) {
+                      setState(() => filtroStatus = 'Revisar');
+                      carregarAulas();
+                    }
+                  },
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -2364,10 +2645,37 @@ class _AbaControleAulasMobileState extends State<AbaControleAulasMobile> {
                     subtitle: Text(
                       'Data: ${a['data_aula']} às ${a['horario']}\nAssunto: ${a['assunto'] ?? ''}\nStatus: ${a['status_aula']}',
                     ),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.edit, color: Colors.indigo),
-                      onPressed: () => editarAula(a),
-                    ),
+                    trailing: filtroStatus == 'Revisar'
+                        ? IconButton(
+                            tooltip: 'Definir situação correta',
+                            icon: const Icon(
+                              Icons.fact_check,
+                              color: Colors.orange,
+                            ),
+                            onPressed: () => resolverAulaEmRevisao(a),
+                          )
+                        : filtroStatus == 'Automáticas' &&
+                              a['confirmacao_automatica'] == true
+                        ? IconButton(
+                            tooltip: 'Desfazer confirmação automática',
+                            icon: const Icon(Icons.undo, color: Colors.orange),
+                            onPressed: () async {
+                              await scheduling.undoAutomaticCompletion(a['id']);
+                              await carregarAulas();
+                              if (!mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'Confirmação desfeita. A aula foi enviada para Revisar.',
+                                  ),
+                                ),
+                              );
+                            },
+                          )
+                        : IconButton(
+                            icon: const Icon(Icons.edit, color: Colors.indigo),
+                            onPressed: () => editarAula(a),
+                          ),
                     isThreeLine: true,
                   ),
                 );
